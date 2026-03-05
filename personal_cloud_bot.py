@@ -287,7 +287,7 @@ async def process_confirm(callback: types.CallbackQuery):
             # Step 1: Album creation info message
             await bot.send_message(
                 STORAGE_CHANNEL,
-                f"📁 **Album Created**\n"
+                f"📁 **Create Album**\n"
                 f"Name: {session['name']}\n"
                 f"Created by: {user_info}",
                 parse_mode="Markdown"
@@ -299,38 +299,37 @@ async def process_confirm(callback: types.CallbackQuery):
             last_msg_id = None
             for i in range(0, len(photos), 10):
                 batch = photos[i:i+10]
-                media_group = []
                 for item in batch:
                     if isinstance(item, dict):
                         fid, mtype = item["file_id"], item["type"]
                     else:
                         fid, mtype = item, "photo"
-                    if mtype == "video":
-                        media_group.append(types.InputMediaVideo(media=fid))
-                    elif mtype == "document":
-                        media_group.append(types.InputMediaDocument(media=fid))
-                    else:
-                        media_group.append(types.InputMediaPhoto(media=fid))
-                try:
-                    sent_msgs = await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
-                    if sent_msgs:
+                    try:
+                        if mtype == "video":
+                            sent = await bot.send_video(STORAGE_CHANNEL, fid)
+                        elif mtype == "document":
+                            sent = await bot.send_document(STORAGE_CHANNEL, fid)
+                        elif mtype == "audio":
+                            sent = await bot.send_audio(STORAGE_CHANNEL, fid)
+                        elif mtype == "voice":
+                            sent = await bot.send_voice(STORAGE_CHANNEL, fid)
+                        else:
+                            sent = await bot.send_photo(STORAGE_CHANNEL, fid)
                         if first_msg_id is None:
-                            first_msg_id = sent_msgs[0].message_id
-                        last_msg_id = sent_msgs[-1].message_id
-                except Exception as ex:
-                    logger.error(f"Channel media send error: {ex}")
-                await asyncio.sleep(0.3)
+                            first_msg_id = sent.message_id
+                        last_msg_id = sent.message_id
+                    except Exception as ex:
+                        logger.error(f"Channel media send error: {ex}")
+                    await asyncio.sleep(0.2)
 
             # Step 3: Summary message with actual chat IDs
-            chat_id_text = f"{first_msg_id} to {last_msg_id}" if first_msg_id else f"1 to {len(photos)}"
             await bot.send_message(
                 STORAGE_CHANNEL,
                 f"✅ **Album Saved & Stored**\n"
                 f"🆔 ID: `{album_id}`\n"
                 f"📁 Name: {session['name']}\n"
-                f"🖼 Photos: {len(photos)}\n"
-                f"🕐 Time: {now_ist().strftime('%Y-%m-%d %H:%M')} IST\n"
-                f"Chat ID: {chat_id_text}",
+                f"🖼 Files: {len(photos)}\n"
+                f"🕐 Time: {now_ist().strftime('%Y-%m-%d %H:%M')} IST",
                 parse_mode="Markdown"
             )
 
@@ -466,32 +465,32 @@ async def save_add(message: types.Message):
                     fid, mtype = item["file_id"], item["type"]
                 else:
                     fid, mtype = item, "photo"
-                if mtype == "video":
-                    media_group.append(types.InputMediaVideo(media=fid))
-                elif mtype == "document":
-                    media_group.append(types.InputMediaDocument(media=fid))
-                else:
-                    media_group.append(types.InputMediaPhoto(media=fid))
-            try:
-                sent_msgs = await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
-                if sent_msgs:
+                try:
+                    if mtype == "video":
+                        sent = await bot.send_video(STORAGE_CHANNEL, fid)
+                    elif mtype == "document":
+                        sent = await bot.send_document(STORAGE_CHANNEL, fid)
+                    elif mtype == "audio":
+                        sent = await bot.send_audio(STORAGE_CHANNEL, fid)
+                    elif mtype == "voice":
+                        sent = await bot.send_voice(STORAGE_CHANNEL, fid)
+                    else:
+                        sent = await bot.send_photo(STORAGE_CHANNEL, fid)
                     if first_msg_id is None:
-                        first_msg_id = sent_msgs[0].message_id
-                    last_msg_id = sent_msgs[-1].message_id
-            except Exception as ex:
-                logger.error(f"Channel add media error: {ex}")
-            await asyncio.sleep(0.3)
+                        first_msg_id = sent.message_id
+                    last_msg_id = sent.message_id
+                except Exception as ex:
+                    logger.error(f"Channel add media error: {ex}")
+                await asyncio.sleep(0.2)
 
         # Step 3: Summary with actual chat IDs
-        chat_id_text = f"{first_msg_id} to {last_msg_id}" if first_msg_id else f"{start_num} to {end_num}"
         await bot.send_message(
             STORAGE_CHANNEL,
             f"➕ **Photos Added**\n"
             f"📁 Album: {session['name']}\n"
             f"🆔 ID: `{session['album_id']}`\n"
-            f"🖼 Added: {len(session['photos'])} photos\n"
-            f"🕐 {now_ist().strftime('%Y-%m-%d %H:%M')} IST\n"
-            f"Chat ID: {chat_id_text}",
+            f"🖼 Added: {len(session['photos'])} files\n"
+            f"🕐 {now_ist().strftime('%Y-%m-%d %H:%M')} IST",
             parse_mode="Markdown"
         )
 

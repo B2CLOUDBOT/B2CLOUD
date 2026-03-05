@@ -132,7 +132,7 @@ async def cmd_album(message: types.Message):
         "name": name,
         "photos": [],
         "ids": set(),
-        "started_at": datetime.now()
+        "started_at": now_ist()
     }
 
     await message.answer(
@@ -146,32 +146,50 @@ async def cmd_album(message: types.Message):
 
 
 # ============================================================
-# PHOTO HANDLER (for create & add modes)
+# MEDIA HANDLER (photo, video, document, audio)
 # ============================================================
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
+async def _handle_media(message: types.Message, file_id: str, unique_id: str, media_type: str):
     uid = message.from_user.id
     if uid not in user_sessions:
-        return  # Silently ignore if no active session
+        return
 
     session = user_sessions[uid]
-    photo = message.photo[-1]  # Highest resolution
-    unique_id = photo.file_unique_id
 
-    # 1) & 3) Duplicate Photo Detection
     if unique_id in session["ids"]:
-        return await message.reply("🚫 **Duplicate photo!** Isse skip kar diya gaya.")
+        return await message.reply(f"🚫 Duplicate {media_type}! Skip kar diya gaya.")
 
-    session["photos"].append(photo.file_id)
+    session["photos"].append({"file_id": file_id, "type": media_type})
     session["ids"].add(unique_id)
 
     count = len(session["photos"])
-    # Feedback every 5 photos or on first photo
     if count == 1 or count % 5 == 0:
         await message.reply(
-            f"✅ Photo #{count} add ho gayi!\n"
+            f"✅ {media_type.capitalize()} #{count} add ho gaya!\n"
             f"Bas bhejte rahein... /close ya /save_add se finish karein."
         )
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    photo = message.photo[-1]
+    await _handle_media(message, photo.file_id, photo.file_unique_id, "photo")
+
+@dp.message(F.video)
+async def handle_video(message: types.Message):
+    await _handle_media(message, message.video.file_id, message.video.file_unique_id, "video")
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    doc = message.document
+    # Allow pdf, jpg, png, and other docs
+    await _handle_media(message, doc.file_id, doc.file_unique_id, "document")
+
+@dp.message(F.audio)
+async def handle_audio(message: types.Message):
+    await _handle_media(message, message.audio.file_id, message.audio.file_unique_id, "audio")
+
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    await _handle_media(message, message.voice.file_id, message.voice.file_unique_id, "voice")
 
 
 # ============================================================
@@ -189,8 +207,8 @@ async def cmd_close(message: types.Message):
         del user_sessions[uid]
         return await message.answer("⚠️ Album mein koi photo nahi thi. Session cancel ho gaya.")
 
-    auto_id = f"ALB-{datetime.now().strftime('%y%m%d%H%M')}"
-    duration = (datetime.now() - session["started_at"]).seconds // 60
+    auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
+    duration = (now_ist() - session["started_at"]).seconds // 60
 
     preview_caption = (
         f"📝 **ALBUM PREVIEW**\n"
@@ -241,15 +259,15 @@ async def process_confirm(callback: types.CallbackQuery):
     session = user_sessions[uid]
 
     if callback.data == "confirm_save":
-        album_id = f"ALB-{datetime.now().strftime('%y%m%d%H%M%S')}"
+        album_id = f"ALB-{now_ist().strftime('%y%m%d%H%M%S')}"
         album_doc = {
             "album_id": album_id,
             "name": session["name"],
             "photos": session["photos"],
             "count": len(session["photos"]),
             "locked": False,
-            "created_at": datetime.now(),
-            "updated_at": datetime.now()
+            "created_at": now_ist(),
+            "updated_at": now_ist()
         }
 
         try:
@@ -262,19 +280,30 @@ async def process_confirm(callback: types.CallbackQuery):
             # Step 1: Album creation info message
             await bot.send_message(
                 STORAGE_CHANNEL,
-                f"📁 **Create Album**\n"
+                f"📁 **Album Created**\n"
                 f"Name: {session['name']}\n"
                 f"Created by: {user_info}",
                 parse_mode="Markdown"
             )
 
-            # Step 2: Send all photos to channel, track message IDs
+            # Step 2: Send all media to channel, track message IDs
             photos = session['photos']
             first_msg_id = None
             last_msg_id = None
             for i in range(0, len(photos), 10):
                 batch = photos[i:i+10]
-                media_group = [types.InputMediaPhoto(media=fid) for fid in batch]
+                media_group = []
+                for item in batch:
+                    if isinstance(item, dict):
+                        fid, mtype = item["file_id"], item["type"]
+                    else:
+                        fid, mtype = item, "photo"
+                    if mtype == "video":
+                        media_group.append(types.InputMediaVideo(media=fid))
+                    elif mtype == "document":
+                        media_group.append(types.InputMediaDocument(media=fid))
+                    else:
+                        media_group.append(types.InputMediaPhoto(media=fid))
                 try:
                     sent_msgs = await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
                     if sent_msgs:
@@ -282,7 +311,7 @@ async def process_confirm(callback: types.CallbackQuery):
                             first_msg_id = sent_msgs[0].message_id
                         last_msg_id = sent_msgs[-1].message_id
                 except Exception as ex:
-                    logger.error(f"Channel photo send error: {ex}")
+                    logger.error(f"Channel media send error: {ex}")
                 await asyncio.sleep(0.3)
 
             # Step 3: Summary message with actual chat IDs
@@ -303,7 +332,7 @@ async def process_confirm(callback: types.CallbackQuery):
                 caption=f"✅ **Album Saved Successfully!**\n\n"
                         f"📁 Name: **{session['name']}**\n"
                         f"🆔 ID: `{album_id}`\n"
-                        f"🖼 Photos: {len(session['photos'])}\n"
+                        f"🖼 Files: {len(session['photos'])}\n"
                         f"📂 `/view_{album_id}` se dekh sakte hain",
                 parse_mode="Markdown"
             )
@@ -361,7 +390,7 @@ async def cmd_add(message: types.Message):
         "name": album["name"],
         "photos": [],
         "ids": set(album.get("photo_unique_ids", [])),  # Existing unique IDs for dup check
-        "started_at": datetime.now()
+        "started_at": now_ist()
     }
 
     await message.answer(
@@ -395,7 +424,7 @@ async def save_add(message: types.Message):
             {
                 "$push": {"photos": {"$each": session["photos"]}},
                 "$inc": {"count": len(session["photos"])},
-                "$set": {"updated_at": datetime.now()}
+                "$set": {"updated_at": now_ist()}
             }
         )
 
@@ -418,13 +447,24 @@ async def save_add(message: types.Message):
             parse_mode="Markdown"
         )
 
-        # Step 2: Send only new photos to channel, track message IDs
+        # Step 2: Send only new media to channel, track message IDs
         new_photos = session['photos']
         first_msg_id = None
         last_msg_id = None
         for i in range(0, len(new_photos), 10):
             batch = new_photos[i:i+10]
-            media_group = [types.InputMediaPhoto(media=fid) for fid in batch]
+            media_group = []
+            for item in batch:
+                if isinstance(item, dict):
+                    fid, mtype = item["file_id"], item["type"]
+                else:
+                    fid, mtype = item, "photo"
+                if mtype == "video":
+                    media_group.append(types.InputMediaVideo(media=fid))
+                elif mtype == "document":
+                    media_group.append(types.InputMediaDocument(media=fid))
+                else:
+                    media_group.append(types.InputMediaPhoto(media=fid))
             try:
                 sent_msgs = await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
                 if sent_msgs:
@@ -432,7 +472,7 @@ async def save_add(message: types.Message):
                         first_msg_id = sent_msgs[0].message_id
                     last_msg_id = sent_msgs[-1].message_id
             except Exception as ex:
-                logger.error(f"Channel add photo error: {ex}")
+                logger.error(f"Channel add media error: {ex}")
             await asyncio.sleep(0.3)
 
         # Step 3: Summary with actual chat IDs
@@ -477,7 +517,7 @@ async def cmd_lock(message: types.Message):
     name = args[1].strip()
     result = await albums_col.update_one(
         {"name": {"$regex": f"^{name}$", "$options": "i"}},
-        {"$set": {"locked": True, "updated_at": datetime.now()}}
+        {"$set": {"locked": True, "updated_at": now_ist()}}
     )
 
     if result.matched_count:
@@ -498,7 +538,7 @@ async def cmd_unlock(message: types.Message):
     name = args[1].strip()
     result = await albums_col.update_one(
         {"name": {"$regex": f"^{name}$", "$options": "i"}},
-        {"$set": {"locked": False, "updated_at": datetime.now()}}
+        {"$set": {"locked": False, "updated_at": now_ist()}}
     )
 
     if result.matched_count:
@@ -549,7 +589,7 @@ async def cmd_rename(message: types.Message):
 
     result = await albums_col.update_one(
         {"name": {"$regex": f"^{old_name}$", "$options": "i"}},
-        {"$set": {"name": new_name, "updated_at": datetime.now()}}
+        {"$set": {"name": new_name, "updated_at": now_ist()}}
     )
 
     if result.matched_count:
@@ -608,7 +648,7 @@ async def process_delete(callback: types.CallbackQuery):
     if result.deleted_count:
         await bot.send_message(
             STORAGE_CHANNEL,
-            f"🗑️ **Album Deleted**\nID: `{album_id}`\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"🗑️ **Album Deleted**\nID: `{album_id}`\nTime: {now_ist().strftime('%Y-%m-%d %H:%M')}",
             parse_mode="Markdown"
         )
         await callback.message.edit_text(
@@ -655,7 +695,7 @@ async def cmd_search(message: types.Message):
     response = f"🔍 **Search Results for '{query}':** ({len(results)} mila)\n\n"
     for alb in results:
         status_icon = "🔒" if alb.get("locked") else "🔓"
-        created = alb.get("created_at", datetime.now()).strftime("%d %b %Y")
+        created = alb.get("created_at", now_ist()).strftime("%d %b %Y")
         response += (
             f"{status_icon} **{alb['name']}**\n"
             f"   🆔 `{alb['album_id']}` | 🖼 {alb['count']} photos | 📅 {created}\n"
@@ -772,7 +812,7 @@ async def cmd_stats(message: types.Message):
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🟢 **Bot Status:** Online\n"
             f"💾 **Storage:** MongoDB Atlas + Telegram Channel\n"
-            f"🕐 **Checked:** {datetime.now().strftime('%d %b %Y, %H:%M')}"
+            f"🕐 **Checked:** {now_ist().strftime('%d %b %Y, %H:%M')}"
         )
 
         await message.answer(stats_text, parse_mode="Markdown")
@@ -817,20 +857,37 @@ async def view_by_id(message: types.Message):
     # Send in media groups of 10 for efficiency
     for i in range(0, len(photos), 10):
         batch = photos[i:i+10]
-        media_group = [types.InputMediaPhoto(media=fid) for fid in batch]
+        media_group = []
+        for item in batch:
+            if isinstance(item, dict):
+                fid, mtype = item["file_id"], item["type"]
+            else:
+                fid, mtype = item, "photo"
+            if mtype == "video":
+                media_group.append(types.InputMediaVideo(media=fid))
+            elif mtype == "document":
+                media_group.append(types.InputMediaDocument(media=fid))
+            else:
+                media_group.append(types.InputMediaPhoto(media=fid))
         try:
             await bot.send_media_group(message.chat.id, media=media_group)
             sent += len(batch)
         except TelegramBadRequest as e:
             logger.error(f"Media group send error: {e}")
-            # Fallback: send one by one
-            for fid in batch:
+            for item in batch:
+                fid = item["file_id"] if isinstance(item, dict) else item
+                mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 try:
-                    await bot.send_photo(message.chat.id, fid)
+                    if mtype == "video":
+                        await bot.send_video(message.chat.id, fid)
+                    elif mtype == "document":
+                        await bot.send_document(message.chat.id, fid)
+                    else:
+                        await bot.send_photo(message.chat.id, fid)
                     sent += 1
                 except:
                     failed += 1
-        await asyncio.sleep(0.5)  # Rate limit protection
+        await asyncio.sleep(0.5)
 
     summary = f"✅ **{sent}/{len(photos)} photos** successfully bheji gayi!"
     if failed:
@@ -887,7 +944,7 @@ async def cmd_grant(message: types.Message):
         granted_users.add(user_id)
         await db.granted_users.update_one(
             {"user_id": user_id},
-            {"$set": {"user_id": user_id, "username": None, "granted_at": datetime.now(), "granted_by": message.from_user.id}},
+            {"$set": {"user_id": user_id, "username": None, "granted_at": now_ist(), "granted_by": message.from_user.id}},
             upsert=True
         )
         await message.answer(
@@ -929,7 +986,7 @@ async def cmd_grant(message: types.Message):
             granted_users.add(user_id)
             await db.granted_users.update_one(
                 {"user_id": user_id},
-                {"$set": {"granted_at": datetime.now(), "granted_by": message.from_user.id}},
+                {"$set": {"granted_at": now_ist(), "granted_by": message.from_user.id}},
                 upsert=True
             )
             await message.answer(
@@ -960,7 +1017,7 @@ async def cmd_grant(message: types.Message):
             # Username se grant kar do, jab pehli baar message karega tab activate hoga
             await db.granted_users.update_one(
                 {"username": username},
-                {"$set": {"username": username, "user_id": None, "granted_at": datetime.now(), "granted_by": message.from_user.id, "pending": True}},
+                {"$set": {"username": username, "user_id": None, "granted_at": now_ist(), "granted_by": message.from_user.id, "pending": True}},
                 upsert=True
             )
             await message.answer(
@@ -1043,7 +1100,7 @@ async def cmd_grantlist(message: types.Message):
         uid = u.get("user_id")
         uname = u.get("username")
         pending = u.get("pending", False)
-        granted_at = u.get("granted_at", datetime.now()).strftime("%d %b %Y")
+        granted_at = u.get("granted_at", now_ist()).strftime("%d %b %Y")
 
         status = "⏳ Pending" if pending else "✅ Active"
         id_str = f"`{uid}`" if uid else "-"

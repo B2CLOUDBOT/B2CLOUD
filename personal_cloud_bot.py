@@ -1119,6 +1119,147 @@ async def cmd_grantlist(message: types.Message):
 
 
 # ============================================================
+# /b2 - Send album to specific user
+# ============================================================
+@dp.message(Command("b2"))
+async def cmd_b2(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    # Format: /b2 ALB-XXXXXX @username_or_userid
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer(
+            "❌ **Usage:**\n"
+            "`/b2 ALB-260306001824 @username`\n"
+            "`/b2 ALB-260306001824 123456789`\n\n"
+            "Album ID aur User ID/username dono zaroori hain.",
+            parse_mode="Markdown"
+        )
+
+    album_identifier = args[1].strip()
+    target = args[2].strip()
+
+    # Find album by ID or name
+    album = await albums_col.find_one({
+        "$or": [
+            {"album_id": album_identifier},
+            {"name": {"$regex": f"^{album_identifier}$", "$options": "i"}}
+        ]
+    })
+
+    if not album:
+        return await message.answer(
+            f"❌ Album **'{album_identifier}'** nahi mila.\n"
+            f"ID ya naam sahi se likhein.",
+            parse_mode="Markdown"
+        )
+
+    if album.get("locked"):
+        return await message.answer(
+            f"🔒 **'{album['name']}'** locked hai!\n"
+            f"Pehle `/unlock {album['name']}` karein.",
+            parse_mode="Markdown"
+        )
+
+    # Resolve target user
+    target_id = None
+    target_name = target
+
+    if target.lstrip("-").isdigit():
+        target_id = int(target)
+        target_name = str(target_id)
+    elif target.startswith("@"):
+        username = target.lstrip("@").lower()
+        # DB mein dhundo
+        user_doc = await db.granted_users.find_one({"username": username})
+        if user_doc and user_doc.get("user_id"):
+            target_id = user_doc["user_id"]
+            target_name = f"@{username}"
+        else:
+            return await message.answer(
+                f"❌ **{target}** ka user ID nahi mila.\n"
+                f"User ne pehle bot ko /start kiya ho, ya seedha User ID use karein.",
+                parse_mode="Markdown"
+            )
+    else:
+        return await message.answer("❌ Valid @username ya User ID dein.", parse_mode="Markdown")
+
+    # Start sending
+    photos = album.get("photos", [])
+    if not photos:
+        return await message.answer("❌ Is album mein koi file nahi hai.", parse_mode="Markdown")
+
+    await message.answer(
+        f"📤 **Sending album to {target_name}...**\n"
+        f"📁 Album: **{album['name']}**\n"
+        f"🖼 Files: {len(photos)}",
+        parse_mode="Markdown"
+    )
+
+    # Send intro message to target user
+    try:
+        await bot.send_message(
+            target_id,
+            f"📂 **{album['name']}**\n"
+            f"🖼 {len(photos)} files\n"
+            f"_Sending..._",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        return await message.answer(
+            f"❌ User **{target_name}** ko message nahi bheji ja saki.\n"
+            f"User ne bot ko pehle /start kiya ho.",
+            parse_mode="Markdown"
+        )
+
+    sent = 0
+    failed = 0
+
+    for item in photos:
+        if isinstance(item, dict):
+            fid, mtype = item["file_id"], item["type"]
+        else:
+            fid, mtype = item, "photo"
+        try:
+            if mtype == "video":
+                await bot.send_video(target_id, fid)
+            elif mtype == "document":
+                await bot.send_document(target_id, fid)
+            elif mtype == "audio":
+                await bot.send_audio(target_id, fid)
+            elif mtype == "voice":
+                await bot.send_voice(target_id, fid)
+            else:
+                await bot.send_photo(target_id, fid)
+            sent += 1
+        except Exception as e:
+            logger.error(f"b2 send error: {e}")
+            failed += 1
+        await asyncio.sleep(0.3)
+
+    # Summary to owner
+    summary = (
+        f"✅ **Album Sent!**\n"
+        f"📁 {album['name']} → {target_name}\n"
+        f"🖼 Sent: {sent}/{len(photos)}"
+    )
+    if failed:
+        summary += f"\n⚠️ Failed: {failed}"
+    await message.answer(summary, parse_mode="Markdown")
+
+    # Summary to target user
+    try:
+        await bot.send_message(
+            target_id,
+            f"✅ **{sent} files** successfully receive ho gayi!",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+
+
+# ============================================================
 # UNKNOWN COMMAND HANDLER
 # ============================================================
 @dp.message(F.text.startswith("/"))

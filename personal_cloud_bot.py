@@ -11,6 +11,11 @@ from aiogram.exceptions import TelegramBadRequest
 # 10) CONFIGURATION & SECURITY
 # ============================================================
 import os
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo('Asia/Kolkata')
+def now_ist():
+    return datetime.now(IST)
 
 API_TOKEN = os.environ["API_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
@@ -263,26 +268,33 @@ async def process_confirm(callback: types.CallbackQuery):
                 parse_mode="Markdown"
             )
 
-            # Step 2: Send all photos to channel
+            # Step 2: Send all photos to channel, track message IDs
             photos = session['photos']
+            first_msg_id = None
+            last_msg_id = None
             for i in range(0, len(photos), 10):
                 batch = photos[i:i+10]
                 media_group = [types.InputMediaPhoto(media=fid) for fid in batch]
                 try:
-                    await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
+                    sent_msgs = await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
+                    if sent_msgs:
+                        if first_msg_id is None:
+                            first_msg_id = sent_msgs[0].message_id
+                        last_msg_id = sent_msgs[-1].message_id
                 except Exception as ex:
                     logger.error(f"Channel photo send error: {ex}")
                 await asyncio.sleep(0.3)
 
-            # Step 3: Summary message with photo range
+            # Step 3: Summary message with actual chat IDs
+            chat_id_text = f"{first_msg_id} to {last_msg_id}" if first_msg_id else f"1 to {len(photos)}"
             await bot.send_message(
                 STORAGE_CHANNEL,
                 f"✅ **Album Saved & Stored**\n"
                 f"🆔 ID: `{album_id}`\n"
                 f"📁 Name: {session['name']}\n"
                 f"🖼 Photos: {len(photos)}\n"
-                f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-                f"Chat ID: 1 to {len(photos)}",
+                f"🕐 Time: {now_ist().strftime('%Y-%m-%d %H:%M')} IST\n"
+                f"Chat ID: {chat_id_text}",
                 parse_mode="Markdown"
             )
 
@@ -406,26 +418,33 @@ async def save_add(message: types.Message):
             parse_mode="Markdown"
         )
 
-        # Step 2: Send only new photos to channel
+        # Step 2: Send only new photos to channel, track message IDs
         new_photos = session['photos']
+        first_msg_id = None
+        last_msg_id = None
         for i in range(0, len(new_photos), 10):
             batch = new_photos[i:i+10]
             media_group = [types.InputMediaPhoto(media=fid) for fid in batch]
             try:
-                await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
+                sent_msgs = await bot.send_media_group(STORAGE_CHANNEL, media=media_group)
+                if sent_msgs:
+                    if first_msg_id is None:
+                        first_msg_id = sent_msgs[0].message_id
+                    last_msg_id = sent_msgs[-1].message_id
             except Exception as ex:
                 logger.error(f"Channel add photo error: {ex}")
             await asyncio.sleep(0.3)
 
-        # Step 3: Summary with photo range
+        # Step 3: Summary with actual chat IDs
+        chat_id_text = f"{first_msg_id} to {last_msg_id}" if first_msg_id else f"{start_num} to {end_num}"
         await bot.send_message(
             STORAGE_CHANNEL,
             f"➕ **Photos Added**\n"
             f"📁 Album: {session['name']}\n"
             f"🆔 ID: `{session['album_id']}`\n"
             f"🖼 Added: {len(session['photos'])} photos\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-            f"Chat ID: {start_num} to {end_num}",
+            f"🕐 {now_ist().strftime('%Y-%m-%d %H:%M')} IST\n"
+            f"Chat ID: {chat_id_text}",
             parse_mode="Markdown"
         )
 
@@ -879,7 +898,7 @@ async def cmd_grant(message: types.Message):
         )
         # Greeting message to newly granted user
         try:
-            now = datetime.now()
+            now = now_ist()
             try:
                 user_chat = await bot.get_chat(user_id)
                 first_name = user_chat.first_name or "Friend"
@@ -891,11 +910,14 @@ async def cmd_grant(message: types.Message):
                 f"🎉 **Grant Access Successfully!**\n\n"
                 f"🥳 **ENJOY!!**\n\n"
                 f"📅 **Access Date:** {now.strftime('%d %B %Y')}\n"
-                f"🕐 **Access Time:** {now.strftime('%I:%M %p')}",
+                f"🕐 **Access Time:** {now.strftime('%I:%M %p')} IST",
                 parse_mode="Markdown"
             )
+            logger.info(f"✅ Greeting sent to {user_id}")
         except Exception as e:
             logger.warning(f"Could not send greeting to {user_id}: {e}")
+            # Agar message nahi gaya to owner ko batao
+            await message.answer(f"⚠️ User ko greeting nahi bheji ja saki. User ne pehle bot ko /start karna hoga.", parse_mode="Markdown")
 
     # @username diya
     elif target.startswith("@"):
@@ -917,7 +939,7 @@ async def cmd_grant(message: types.Message):
             )
             # Greeting message to newly granted user
             try:
-                now = datetime.now()
+                now = now_ist()
                 try:
                     user_chat = await bot.get_chat(user_id)
                     first_name = user_chat.first_name or "Friend"

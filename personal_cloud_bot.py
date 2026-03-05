@@ -229,13 +229,20 @@ async def cmd_close(message: types.Message):
     )
 
     try:
-        await bot.send_photo(
-            message.chat.id,
-            session["photos"][0],
-            caption=preview_caption,
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
+        first_item = session["photos"][0]
+        if isinstance(first_item, dict):
+            fid = first_item["file_id"]
+            mtype = first_item["type"]
+        else:
+            fid = first_item
+            mtype = "photo"
+
+        if mtype == "video":
+            await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "document":
+            await bot.send_document(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        else:
+            await bot.send_photo(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
     except TelegramBadRequest as e:
         logger.error(f"Preview send failed: {e}")
         await message.answer("❌ Preview generate nahi ho saka. Dobara try karein.")

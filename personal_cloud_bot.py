@@ -287,7 +287,7 @@ async def process_confirm(callback: types.CallbackQuery):
             # Step 1: Album creation info message
             await bot.send_message(
                 STORAGE_CHANNEL,
-                f"📁 **Create Album**\n"
+                f"📁 **Album Created**\n"
                 f"Name: {session['name']}\n"
                 f"Created by: {user_info}",
                 parse_mode="Markdown"

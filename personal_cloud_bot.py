@@ -462,7 +462,7 @@ async def save_add(message: types.Message):
         # Step 1: Photo added info message
         await bot.send_message(
             STORAGE_CHANNEL,
-            f"📁 **Photo Added**\n"
+            f"📁 **Photos Added**\n"
             f"Name: {session['name']}\n"
             f"Created by: {user_info}",
             parse_mode="Markdown"
@@ -1154,13 +1154,6 @@ async def cmd_b2(message: types.Message):
         return await message.answer(
             f"❌ Album **'{album_identifier}'** nahi mila.\n"
             f"ID ya naam sahi se likhein.",
-            parse_mode="Markdown"
-        )
-
-    if album.get("locked"):
-        return await message.answer(
-            f"🔒 **'{album['name']}'** locked hai!\n"
-            f"Pehle `/unlock {album['name']}` karein.",
             parse_mode="Markdown"
         )
 

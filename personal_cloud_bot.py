@@ -832,7 +832,6 @@ async def cmd_stats(message: types.Message):
             f"🏆 **Largest Album:** {largest_name}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🟢 **Bot Status:** Online\n"
-            f"💾 **Storage:** MongoDB Atlas + Telegram Channel\n"
             f"🕐 **Checked:** {now_ist().strftime('%d %b %Y, %H:%M')}"
         )
 
@@ -856,13 +855,6 @@ async def view_by_id(message: types.Message):
 
     if not album:
         return await message.answer(f"❌ Album ID **`{aid}`** nahi mila.", parse_mode="Markdown")
-
-    if album.get("locked"):
-        return await message.answer(
-            f"🔒 **'{album['name']}'** album locked hai!\n"
-            f"Pehle `/unlock {album['name']}` karein.",
-            parse_mode="Markdown"
-        )
 
     await message.answer(
         f"📂 **{album['name']}**\n"

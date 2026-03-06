@@ -17,8 +17,12 @@ from aiogram.exceptions import TelegramBadRequest
 # CONFIGURATION
 # ============================================================
 IST = ZoneInfo('Asia/Kolkata')
-def now_ist():
+def now_db():
     return datetime.now(IST)
+
+def now_db():
+    """MongoDB ke liye timezone-naive datetime"""
+    return datetime.now()
 
 API_TOKEN = os.environ["API_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
@@ -46,6 +50,7 @@ def is_owner(uid): return uid == ADMIN_ID
 def is_admin(uid): return uid == ADMIN_ID or uid in granted_users
 
 async def find_album(identifier: str):
+    identifier = identifier.strip()
     return await albums_col.find_one({
         "$or": [
             {"name": {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}},
@@ -152,7 +157,7 @@ async def cmd_album(message: types.Message):
 
     user_sessions[message.from_user.id] = {
         "mode": "create", "name": name,
-        "photos": [], "ids": set(), "started_at": now_ist()
+        "photos": [], "ids": set(), "started_at": now_db()
     }
 
     await message.answer(
@@ -181,18 +186,7 @@ async def _handle_media(message: types.Message, file_id: str, unique_id: str, me
     session["ids"].add(unique_id)
     count = len(session["photos"])
 
-    if count == 1 or count % 5 == 0:
-        kb = InlineKeyboardBuilder()
-        if session["mode"] == "create":
-            kb.button(text="✅ Close & Preview", callback_data="quick_close")
-        else:
-            kb.button(text="✅ Save Add", callback_data="quick_save_add")
-        kb.button(text="❌ Cancel", callback_data="quick_cancel")
-        await message.reply(
-            f"✅ {media_type.capitalize()} #{count} add ho gaya!\n"
-            f"Bhejte rahein ya neeche button dabayein.",
-            reply_markup=kb.as_markup()
-        )
+    pass  # No feedback on each photo
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
@@ -260,7 +254,7 @@ async def cmd_close(message: types.Message):
         return await message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
 
     auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
-    duration = (now_ist() - session["started_at"]).seconds // 60
+    duration = (now_db() - session["started_at"]).seconds // 60
     photos, videos, docs, audios = count_media(session["photos"])
 
     stats = ""
@@ -328,13 +322,13 @@ async def process_confirm(callback: types.CallbackQuery):
             "tags": [],
             "created_by": uid,
             "created_by_username": callback.from_user.username or "",
-            "created_at": now_ist(),
-            "updated_at": now_ist(),
+            "created_at": now_db(),
+            "updated_at": now_db(),
             "history": [{
                 "action": "created",
                 "count": len(session["photos"]),
                 "by": uid,
-                "at": now_ist()
+                "at": now_db()
             }],
             "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}
         }
@@ -420,7 +414,7 @@ async def cmd_add(message: types.Message):
         "mode": "add", "db_id": album["_id"],
         "album_id": album["album_id"], "name": album["name"],
         "photos": [], "ids": set(album.get("photo_unique_ids", [])),
-        "started_at": now_ist()
+        "started_at": now_db()
     }
 
     await message.answer(
@@ -458,7 +452,7 @@ async def save_add(message: types.Message):
                         "action": "added",
                         "count": new_count,
                         "by": uid,
-                        "at": now_ist()
+                        "at": now_db()
                     }
                 },
                 "$inc": {
@@ -468,7 +462,7 @@ async def save_add(message: types.Message):
                     "media_count.docs": new_docs,
                     "media_count.audios": new_audios
                 },
-                "$set": {"updated_at": now_ist()}
+                "$set": {"updated_at": now_db()}
             }
         )
 
@@ -519,7 +513,7 @@ async def cmd_lock(message: types.Message):
     if len(args) < 2: return await message.answer("❌ Usage: `/lock AlbumName`", parse_mode="Markdown")
     album = await find_album(args[1].strip())
     if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
-    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"locked": True, "updated_at": now_ist()}})
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"locked": True, "updated_at": now_db()}})
     await message.answer(f"🔒 **'{album['name']}'** locked!", parse_mode="Markdown")
 
 @dp.message(Command("unlock"))
@@ -529,7 +523,7 @@ async def cmd_unlock(message: types.Message):
     if len(args) < 2: return await message.answer("❌ Usage: `/unlock AlbumName`", parse_mode="Markdown")
     album = await find_album(args[1].strip())
     if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
-    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"locked": False, "updated_at": now_ist()}})
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"locked": False, "updated_at": now_db()}})
     await message.answer(f"🔓 **'{album['name']}'** unlocked!", parse_mode="Markdown")
 
 
@@ -541,20 +535,27 @@ async def cmd_rename(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     parts = message.text.split(maxsplit=1)
     text = parts[1].strip() if len(parts) > 1 else ""
-    quoted = re.findall(r"['\"](.+?)['\"]", text)
+    # Support single quotes, double quotes, or plain words
+    quoted = re.findall(r"['\"](.*?)['\"]+", text)
     if len(quoted) >= 2:
         old_name, new_name = quoted[0].strip(), quoted[1].strip()
     else:
         simple = text.split()
         if len(simple) < 2:
-            return await message.answer("❌ Usage: `/rename OldName NewName` ya `/rename 'Old Name' 'New Name'`", parse_mode="Markdown")
+            return await message.answer(
+                "❌ Usage:\n"
+                "`/rename OldName NewName`\n"
+                "`/rename 'Old Name' 'New Name'`\n"
+                "`/rename ALB-xxx NewName`",
+                parse_mode="Markdown"
+            )
         old_name, new_name = simple[0], simple[1]
 
     album = await find_album(old_name)
     if not album: return await message.answer(f"❌ **'{old_name}'** nahi mila.", parse_mode="Markdown")
     conflict = await albums_col.find_one({"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}})
     if conflict: return await message.answer(f"⚠️ **'{new_name}'** already exists!", parse_mode="Markdown")
-    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"name": new_name, "updated_at": now_ist()}})
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"name": new_name, "updated_at": now_db()}})
     await message.answer(f"📝 **{album['name']}** → **{new_name}**", parse_mode="Markdown")
 
 
@@ -668,7 +669,7 @@ async def dlt_toggle(callback: types.CallbackQuery):
         return await callback.answer("Session expire ho gaya.", show_alert=True)
 
     parts = callback.data.split("_")
-    idx = int(parts[4])
+    idx = int(parts[-2])  # second to last: dlt_toggle_ALB-xxx_IDX_keep/del
     session = user_sessions[uid]
 
     if idx in session["selected"]:
@@ -754,7 +755,7 @@ async def dlt_confirm(callback: types.CallbackQuery):
             "$set": {
                 "photos": new_files,
                 "count": len(new_files),
-                "updated_at": now_ist(),
+                "updated_at": now_db(),
                 "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}
             },
             "$push": {
@@ -762,7 +763,7 @@ async def dlt_confirm(callback: types.CallbackQuery):
                     "action": "deleted",
                     "count": -del_count,
                     "by": uid,
-                    "at": now_ist()
+                    "at": now_db()
                 }
             }
         }
@@ -815,8 +816,8 @@ async def cmd_merge(message: types.Message):
         "photos": merged_files, "count": len(merged_files),
         "locked": False, "tags": [],
         "created_by": message.from_user.id,
-        "created_at": now_ist(), "updated_at": now_ist(),
-        "history": [{"action": "merged", "from": [a1["album_id"], a2["album_id"]], "by": message.from_user.id, "at": now_ist()}],
+        "created_at": now_db(), "updated_at": now_db(),
+        "history": [{"action": "merged", "from": [a1["album_id"], a2["album_id"]], "by": message.from_user.id, "at": now_db()}],
         "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}
     })
 
@@ -825,33 +826,6 @@ async def cmd_merge(message: types.Message):
         f"📁 **{a1['name']}** ({a1['count']}) + **{a2['name']}** ({a2['count']})\n"
         f"➡️ **{new_name}** | 🆔 `{new_id}`\n"
         f"🗂 Total: {len(merged_files)} files",
-        parse_mode="Markdown"
-    )
-
-
-# ============================================================
-# /duplicate
-# ============================================================
-@dp.message(Command("duplicate"))
-async def cmd_duplicate(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        return await message.answer("❌ Usage: `/duplicate ALB-xxx NewName`", parse_mode="Markdown")
-
-    album = await find_album(args[1].strip())
-    if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
-    new_name = args[2].strip()
-    conflict = await albums_col.find_one({"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}})
-    if conflict: return await message.answer(f"⚠️ **'{new_name}'** already exists!", parse_mode="Markdown")
-
-    new_id = f"ALB-{now_ist().strftime('%y%m%d%H%M%S')}"
-    new_album = {**album, "_id": None, "album_id": new_id, "name": new_name,
-                 "created_at": now_ist(), "updated_at": now_ist()}
-    new_album.pop("_id")
-    await albums_col.insert_one(new_album)
-    await message.answer(
-        f"✅ **Album Duplicated!**\n📁 **{album['name']}** → **{new_name}**\n🆔 `{new_id}`",
         parse_mode="Markdown"
     )
 
@@ -874,7 +848,7 @@ async def cmd_tag(message: types.Message):
 
     existing_tags = album.get("tags", [])
     all_tags = list(set(existing_tags + [t.lower() for t in new_tags]))
-    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"tags": all_tags, "updated_at": now_ist()}})
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"tags": all_tags, "updated_at": now_db()}})
     await message.answer(
         f"🏷️ **Tags Updated!**\n📁 **{album['name']}**\nTags: {' '.join(all_tags)}",
         parse_mode="Markdown"
@@ -909,7 +883,7 @@ async def cmd_search(message: types.Message):
     response = f"🔍 **'{query}'** — {len(results)} mila\n\n"
     for alb in results:
         lock = "🔒" if alb.get("locked") else "🔓"
-        date = alb.get("created_at", now_ist()).strftime("%d %b %Y")
+        date = alb.get("created_at", now_db()).strftime("%d %b %Y")
         tags = " ".join(alb.get("tags", []))
         response += (
             f"{lock} **{alb['name']}**\n"
@@ -949,7 +923,7 @@ async def cmd_list(message: types.Message):
             aid = alb.get("album_id") or "N/A"
             name = alb.get("name") or "Unnamed"
             count = alb.get("count", 0)
-            date = alb.get("created_at", now_ist()).strftime("%d %b %Y, %I:%M %p")
+            date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
             tags = " ".join(alb.get("tags", []))
             tag_line = f"\n   🏷️ {tags}" if tags else ""
 
@@ -1005,7 +979,7 @@ async def cmd_info(message: types.Message):
     aid = album["album_id"]
     tags = " ".join(album.get("tags", [])) or "None"
     lock = "🔒 Locked" if album.get("locked") else "🔓 Unlocked"
-    created = album.get("created_at", now_ist()).strftime("%d %b %Y, %I:%M %p")
+    created = album.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
     by_username = album.get("created_by_username", "")
     by_str = f"@{by_username}" if by_username else f"ID: {album.get('created_by', 'N/A')}"
 
@@ -1033,7 +1007,7 @@ async def cmd_info(message: types.Message):
         for h in history[-5:]:
             action = h.get("action", "")
             count = h.get("count", 0)
-            at = h.get("at", now_ist())
+            at = h.get("at", now_db())
             if isinstance(at, datetime): date_str = at.strftime("%d %b %Y")
             else: date_str = str(at)
             if action == "created": text += f"   ✨ Created | {date_str}\n"
@@ -1205,7 +1179,7 @@ async def cmd_recent(message: types.Message):
 
     text = "🕐 **Recently Updated Albums:**\n\n"
     for alb in albums:
-        date = alb.get("updated_at", now_ist()).strftime("%d %b %Y, %I:%M %p")
+        date = alb.get("updated_at", now_db()).strftime("%d %b %Y, %I:%M %p")
         text += f"📁 **{alb['name']}** | 🗂 {alb['count']} files\n📅 {date}\n👁 /view_{alb['album_id']}\n\n"
     await message.answer(text, parse_mode="Markdown")
 
@@ -1310,7 +1284,7 @@ async def cmd_b2(message: types.Message):
                 "sent_to": uid,
                 "sent_to_name": uname,
                 "files_count": sent,
-                "sent_at": now_ist()
+                "sent_at": now_db()
             })
             await message.answer(f"✅ **{uname}** ko {sent} files bhej di!", parse_mode="Markdown")
 
@@ -1329,7 +1303,7 @@ async def cmd_b2list(message: types.Message):
 
     text = "📤 **Share History (Last 20):**\n\n"
     for h in history:
-        date = h.get("sent_at", now_ist()).strftime("%d %b %Y, %I:%M %p")
+        date = h.get("sent_at", now_db()).strftime("%d %b %Y, %I:%M %p")
         text += (
             f"📁 **{h.get('album_name', 'N/A')}**\n"
             f"➡️ To: {h.get('sent_to_name', h.get('sent_to'))}\n"
@@ -1365,7 +1339,7 @@ async def send_greeting(user_id: int, fallback_name: str = "Friend"):
             uc = await bot.get_chat(user_id)
             name = uc.first_name or fallback_name
         except: name = fallback_name
-        now = now_ist()
+        now = now_db()
         await bot.send_message(user_id,
             f"👋 **HEY {name}!**\n\n"
             f"🎉 **Grant Access Successfully!**\n\n"
@@ -1398,7 +1372,7 @@ async def cmd_grant(message: types.Message):
         granted_users.add(uid)
         await db.granted_users.update_one(
             {"user_id": uid},
-            {"$set": {"user_id": uid, "username": None, "granted_at": now_ist(), "granted_by": message.from_user.id}},
+            {"$set": {"user_id": uid, "username": None, "granted_at": now_db(), "granted_by": message.from_user.id}},
             upsert=True
         )
         await message.answer(f"✅ **Access Granted!**\n🆔 `{uid}`", parse_mode="Markdown")
@@ -1414,7 +1388,7 @@ async def cmd_grant(message: types.Message):
             granted_users.add(uid)
             await db.granted_users.update_one(
                 {"user_id": uid},
-                {"$set": {"granted_at": now_ist(), "granted_by": message.from_user.id}},
+                {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}},
                 upsert=True
             )
             await message.answer(f"✅ **Access Granted!**\n👤 @{username} | 🆔 `{uid}`", parse_mode="Markdown")
@@ -1424,7 +1398,7 @@ async def cmd_grant(message: types.Message):
         else:
             await db.granted_users.update_one(
                 {"username": username},
-                {"$set": {"username": username, "user_id": None, "granted_at": now_ist(), "granted_by": message.from_user.id, "pending": True}},
+                {"$set": {"username": username, "user_id": None, "granted_at": now_db(), "granted_by": message.from_user.id, "pending": True}},
                 upsert=True
             )
             await message.answer(
@@ -1471,7 +1445,7 @@ async def cmd_grantlist(message: types.Message):
         uid = u.get("user_id")
         uname = u.get("username")
         pending = u.get("pending", False)
-        date = u.get("granted_at", now_ist()).strftime("%d %b %Y")
+        date = u.get("granted_at", now_db()).strftime("%d %b %Y")
         status = "⏳ Pending" if pending else "✅ Active"
         id_str = f"`{uid}`" if uid else "-"
         name_str = f"@{uname}" if uname else "-"
@@ -1499,7 +1473,7 @@ async def cmd_grantlistinfo(message: types.Message):
 
     text = f"👤 **{uname}** ki Albums:\n━━━━━━━━━━━━━━━━━━\n\n"
     for alb in albums:
-        date = alb.get("created_at", now_ist()).strftime("%d %b %Y, %I:%M %p")
+        date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
         text += (
             f"📁 **{alb['name']}**\n"
             f"🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n"

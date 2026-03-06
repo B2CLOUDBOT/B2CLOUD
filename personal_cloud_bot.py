@@ -287,7 +287,7 @@ async def process_confirm(callback: types.CallbackQuery):
             # Step 1: Album creation info message
             await bot.send_message(
                 STORAGE_CHANNEL,
-                f"📁 **Album Created**\n"
+                f"📁 **Create Album**\n"
                 f"Name: {session['name']}\n"
                 f"Created by: {user_info}",
                 parse_mode="Markdown"
@@ -368,11 +368,17 @@ async def cmd_add(message: types.Message):
         return await message.answer("❌ Usage: `/add AlbumName`", parse_mode="Markdown")
 
     name = args[1].strip()
-    album = await albums_col.find_one({"name": {"$regex": f"^{name}$", "$options": "i"}})
+    # Search by name OR album_id
+    album = await albums_col.find_one({
+        "$or": [
+            {"name": {"$regex": f"^{name}$", "$options": "i"}},
+            {"album_id": name}
+        ]
+    })
 
     if not album:
         return await message.answer(
-            f"❌ **'{name}'** naam ka album nahi mila.\n"
+            f"❌ **'{name}'** naam ya ID ka album nahi mila.\n"
             f"Check ke liye `/albums` dekhein.",
             parse_mode="Markdown"
         )
@@ -1272,6 +1278,9 @@ async def cmd_id(message: types.Message):
         f"\U0001f194 User ID: `{user.id}`\n"
         f"\U0001f4db Name: {user.full_name}\n"
         f"\U0001f517 Username: {uname}\n\n"
+        "\U0001f4ac **Chat Info:**\n"
+        f"\U0001f194 Chat ID: `{chat.id}`\n"
+        f"\U0001f4dd Chat Type: {chat.type}"
     )
     await message.answer(user_info, parse_mode="Markdown")
 

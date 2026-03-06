@@ -220,15 +220,90 @@ async def handle_voice(message: types.Message):
 @dp.callback_query(F.data == "quick_close")
 async def quick_close(callback: types.CallbackQuery):
     await callback.answer()
-    callback.message.text = "/close"
-    callback.message.from_user = callback.from_user
-    await cmd_close(callback.message)
+    uid = callback.from_user.id
+    if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
+        return await callback.message.answer("⚠️ Koi active album creation session nahi hai.")
+
+    session = user_sessions[uid]
+    if not session["photos"]:
+        del user_sessions[uid]
+        return await callback.message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
+
+    auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
+    duration = (now_ist() - session["started_at"]).seconds // 60
+    photos, videos, docs, audios = count_media(session["photos"])
+
+    stats = ""
+    if photos: stats += f"📸 {photos} photos\n"
+    if videos: stats += f"🎥 {videos} videos\n"
+    if docs: stats += f"📄 {docs} documents\n"
+    if audios: stats += f"🎵 {audios} audio\n"
+
+    preview_caption = (
+        f"📝 **ALBUM PREVIEW**\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📁 Name: **{session['name']}**\n"
+        f"🆔 ID: `{auto_id}`\n"
+        f"{stats}"
+        f"⏱ Session: ~{duration} min\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Save karna chahte hain?"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
+        types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
+    )
+
+    first = session["photos"][0]
+    fid = first["file_id"] if isinstance(first, dict) else first
+    mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
+
+    try:
+        if mtype == "video":
+            await bot.send_video(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "document":
+            await bot.send_document(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        else:
+            await bot.send_photo(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    except TelegramBadRequest as e:
+        logger.error(f"Preview error: {e}")
+        await callback.message.answer("❌ Preview generate nahi ho saka.")
 
 @dp.callback_query(F.data == "quick_save_add")
 async def quick_save_add_cb(callback: types.CallbackQuery):
     await callback.answer()
-    callback.message.from_user = callback.from_user
-    await save_add(callback.message)
+    uid = callback.from_user.id
+    if uid not in user_sessions or user_sessions[uid]["mode"] != "add":
+        return await callback.message.answer("⚠️ Koi active add session nahi hai.")
+    # Reuse save_add logic inline
+    session = user_sessions[uid]
+    if not session["photos"]:
+        del user_sessions[uid]
+        return await callback.message.answer("⚠️ Koi file nahi bheji.")
+
+    new_count = len(session["photos"])
+    new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
+    await albums_col.update_one(
+        {"_id": session["db_id"]},
+        {
+            "$push": {"photos": {"$each": session["photos"]}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
+            "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
+            "$set": {"updated_at": now_db()}
+        }
+    )
+    for item in session["photos"]:
+        fid = item["file_id"] if isinstance(item, dict) else item
+        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+        try:
+            if mtype == "video": await bot.send_video(STORAGE_CHANNEL, fid)
+            elif mtype == "document": await bot.send_document(STORAGE_CHANNEL, fid)
+            else: await bot.send_photo(STORAGE_CHANNEL, fid)
+            await asyncio.sleep(0.2)
+        except: pass
+    await callback.message.answer(f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**", parse_mode="Markdown")
+    del user_sessions[uid]
 
 @dp.callback_query(F.data == "quick_cancel")
 async def quick_cancel_cb(callback: types.CallbackQuery):
@@ -236,7 +311,7 @@ async def quick_cancel_cb(callback: types.CallbackQuery):
     uid = callback.from_user.id
     if uid in user_sessions:
         del user_sessions[uid]
-    await callback.message.reply("❌ Session cancel ho gaya.")
+    await callback.message.answer("❌ Session cancel ho gaya.")
 
 
 # ============================================================
@@ -247,6 +322,8 @@ async def cmd_close(message: types.Message):
     uid = message.from_user.id
     if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
         return await message.answer("⚠️ Koi active album creation session nahi hai.")
+    
+    logger.info(f"cmd_close called by {uid}, session photos: {len(user_sessions[uid].get('photos', []))}")
 
     session = user_sessions[uid]
     if not session["photos"]:
@@ -291,9 +368,13 @@ async def cmd_close(message: types.Message):
             await bot.send_document(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         else:
             await bot.send_photo(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    except TelegramBadRequest as e:
-        logger.error(f"Preview error: {e}")
-        await message.answer("❌ Preview generate nahi ho saka.")
+    except Exception as e:
+        logger.error(f"Preview send error: {e}")
+        try:
+            await message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        except Exception as e2:
+            logger.error(f"Text fallback error: {e2}")
+            await message.answer(f"❌ Preview error: {e}", parse_mode="Markdown")
 
 
 # ============================================================

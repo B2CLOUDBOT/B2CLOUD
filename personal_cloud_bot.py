@@ -49,6 +49,15 @@ def is_admin(user_id: int) -> bool:
 # Granted users ka in-memory + DB backed set
 granted_users: set = set()
 
+async def find_album(identifier: str):
+    """Album ko naam ya ID dono se dhundho"""
+    return await albums_col.find_one({
+        "$or": [
+            {"name": {"$regex": f"^{identifier}$", "$options": "i"}},
+            {"album_id": identifier}
+        ]
+    })
+
 
 # ============================================================
 # /start - Welcome Message
@@ -527,15 +536,15 @@ async def cmd_lock(message: types.Message):
         return await message.answer("❌ Usage: `/lock AlbumName`", parse_mode="Markdown")
 
     name = args[1].strip()
-    result = await albums_col.update_one(
-        {"name": {"$regex": f"^{name}$", "$options": "i"}},
+    album = await find_album(name)
+    if not album:
+        return await message.answer(f"❌ Album **'{name}'** nahi mila.", parse_mode="Markdown")
+
+    await albums_col.update_one(
+        {"_id": album["_id"]},
         {"$set": {"locked": True, "updated_at": now_ist()}}
     )
-
-    if result.matched_count:
-        await message.answer(f"🔒 Album **'{name}'** lock ho gaya!\nAb koi photo add nahi ki ja sakti.", parse_mode="Markdown")
-    else:
-        await message.answer(f"❌ Album **'{name}'** nahi mila.", parse_mode="Markdown")
+    await message.answer(f"🔒 Album **'{album['name']}'** lock ho gaya!\nAb koi file add nahi ki ja sakti.", parse_mode="Markdown")
 
 
 @dp.message(Command("unlock"))
@@ -548,15 +557,15 @@ async def cmd_unlock(message: types.Message):
         return await message.answer("❌ Usage: `/unlock AlbumName`", parse_mode="Markdown")
 
     name = args[1].strip()
-    result = await albums_col.update_one(
-        {"name": {"$regex": f"^{name}$", "$options": "i"}},
+    album = await find_album(name)
+    if not album:
+        return await message.answer(f"❌ Album **'{name}'** nahi mila.", parse_mode="Markdown")
+
+    await albums_col.update_one(
+        {"_id": album["_id"]},
         {"$set": {"locked": False, "updated_at": now_ist()}}
     )
-
-    if result.matched_count:
-        await message.answer(f"🔓 Album **'{name}'** unlock ho gaya!\nAb photos add ki ja sakti hain.", parse_mode="Markdown")
-    else:
-        await message.answer(f"❌ Album **'{name}'** nahi mila.", parse_mode="Markdown")
+    await message.answer(f"🔓 Album **'{album['name']}'** unlock ho gaya!\nAb files add ki ja sakti hain.", parse_mode="Markdown")
 
 
 # ============================================================
@@ -599,15 +608,15 @@ async def cmd_rename(message: types.Message):
     if conflict:
         return await message.answer(f"⚠️ **'{new_name}'** naam pehle se exist karta hai!", parse_mode="Markdown")
 
-    result = await albums_col.update_one(
-        {"name": {"$regex": f"^{old_name}$", "$options": "i"}},
+    album = await find_album(old_name)
+    if not album:
+        return await message.answer(f"❌ **'{old_name}'** naam ya ID ka album nahi mila.", parse_mode="Markdown")
+
+    await albums_col.update_one(
+        {"_id": album["_id"]},
         {"$set": {"name": new_name, "updated_at": now_ist()}}
     )
-
-    if result.matched_count:
-        await message.answer(f"📝 Album rename ho gaya!\n**{old_name}** → **{new_name}**", parse_mode="Markdown")
-    else:
-        await message.answer(f"❌ **'{old_name}'** naam ka album nahi mila.", parse_mode="Markdown")
+    await message.answer(f"📝 Album rename ho gaya!\n**{album['name']}** → **{new_name}**", parse_mode="Markdown")
 
 
 @dp.message(Command("delete"))
@@ -621,10 +630,10 @@ async def cmd_delete(message: types.Message):
 
     name = args[1].strip()
 
-    # Find album first for confirmation
-    album = await albums_col.find_one({"name": {"$regex": f"^{name}$", "$options": "i"}})
+    # Find album by name OR ID
+    album = await find_album(name)
     if not album:
-        return await message.answer(f"❌ **'{name}'** naam ka album nahi mila.", parse_mode="Markdown")
+        return await message.answer(f"❌ **'{name}'** naam ya ID ka album nahi mila.", parse_mode="Markdown")
 
     # Confirm delete with inline buttons
     builder = InlineKeyboardBuilder()
@@ -843,7 +852,7 @@ async def view_by_id(message: types.Message):
         return await message.answer("🚫 Access Denied!")
 
     aid = message.text.replace("/view_", "").strip()
-    album = await albums_col.find_one({"album_id": aid})
+    album = await find_album(aid)
 
     if not album:
         return await message.answer(f"❌ Album ID **`{aid}`** nahi mila.", parse_mode="Markdown")
@@ -1147,12 +1156,7 @@ async def cmd_b2(message: types.Message):
     target = args[2].strip()
 
     # Find album by ID or name
-    album = await albums_col.find_one({
-        "$or": [
-            {"album_id": album_identifier},
-            {"name": {"$regex": f"^{album_identifier}$", "$options": "i"}}
-        ]
-    })
+    album = await find_album(album_identifier)
 
     if not album:
         return await message.answer(

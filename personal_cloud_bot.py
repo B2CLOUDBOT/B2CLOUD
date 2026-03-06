@@ -451,22 +451,42 @@ async def process_confirm(callback: types.CallbackQuery):
                 f"🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
                 parse_mode="Markdown")
 
-            await callback.message.edit_caption(
-                caption=f"✅ **Album Saved!**\n\n"
-                        f"📁 **{session['name']}**\n"
-                        f"🆔 `{album_id}`\n"
-                        f"🗂 {len(session['photos'])} files\n"
-                        f"👁 /view_{album_id}",
+            # Remove buttons from preview
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except: pass
+
+            await callback.answer("✅ Saved!")
+            await callback.message.answer(
+                f"✅ **Album Saved Successfully!**\n\n"
+                f"📁 Name: **{session['name']}**\n"
+                f"🆔 ID: `{album_id}`\n"
+                f"🗂 Files: {len(session['photos'])}\n"
+                f"👁 /view_{album_id} se dekh sakte hain",
                 parse_mode="Markdown"
             )
-            await callback.answer("✅ Saved!")
 
         except Exception as e:
             logger.error(f"Save error: {e}")
-            await callback.message.answer("❌ Save error. Retry karein.")
+            # Check if album was actually saved despite error
+            saved = await albums_col.find_one({"album_id": album_id})
+            if saved:
+                await callback.message.answer(
+                    f"✅ **Album Saved Successfully!**\n\n"
+                    f"📁 Name: **{session['name']}**\n"
+                    f"🆔 ID: `{album_id}`\n"
+                    f"🗂 Files: {len(session['photos'])}\n"
+                    f"👁 /view_{album_id} se dekh sakte hain",
+                    parse_mode="Markdown"
+                )
+            else:
+                await callback.message.answer("❌ Save error. Retry karein.")
     else:
         await callback.answer("❌ Cancelled")
-        await callback.message.edit_caption(caption="❌ Album save cancel.", parse_mode="Markdown")
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except: pass
+        await callback.message.answer("❌ Album save cancel.")
 
     del user_sessions[uid]
 

@@ -1272,9 +1272,6 @@ async def cmd_id(message: types.Message):
         f"\U0001f194 User ID: `{user.id}`\n"
         f"\U0001f4db Name: {user.full_name}\n"
         f"\U0001f517 Username: {uname}\n\n"
-        "\U0001f4ac **Chat Info:**\n"
-        f"\U0001f194 Chat ID: `{chat.id}`\n"
-        f"\U0001f4dd Chat Type: {chat.type}"
     )
     await message.answer(user_info, parse_mode="Markdown")
 

@@ -1335,28 +1335,47 @@ async def cmd_zip(message: types.Message):
 
         zip_buffer.seek(0)
 
-        # Send ZIP file
+        # Send ZIP file with buttons
         if zipped > 0:
+            zip_name = album['name']
             zip_msg = await bot.send_document(
                 message.chat.id,
                 document=types.BufferedInputFile(
                     zip_buffer.read(),
-                    filename=f"{album['name']}.zip"
+                    filename=f"{zip_name}.zip"
                 ),
                 caption=(
-                    f"📦 **{album['name']}.zip**\n"
+                    f"📦 **{zip_name}.zip**\n"
                     f"🖼 Files: {zipped}\n"
-                    f"⚠️ _Yeh ZIP 5 minute mein delete ho jayega!_"
+                    f"⚠️ _Auto-delete: 5 min_"
                 ),
                 parse_mode="Markdown"
             )
 
+            # Add buttons with real message ID
+            btn_builder = InlineKeyboardBuilder()
+            btn_builder.row(
+                types.InlineKeyboardButton(
+                    text="🗑️ Delete ZIP",
+                    callback_data=f"delzip_{zip_msg.message_id}_{message.chat.id}"
+                ),
+                types.InlineKeyboardButton(
+                    text="📤 Share",
+                    switch_inline_query=f"{zip_name}.zip"
+                )
+            )
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=zip_msg.message_id,
+                reply_markup=btn_builder.as_markup()
+            )
+
             # Auto delete ZIP after 5 minutes
-            async def delete_zip():
+            async def delete_zip(mid=zip_msg.message_id, cid=message.chat.id, name=zip_name):
                 await asyncio.sleep(300)
                 try:
-                    await bot.delete_message(message.chat.id, zip_msg.message_id)
-                    await message.answer(f"🗑️ ZIP auto-deleted: **{album['name']}.zip**", parse_mode="Markdown")
+                    await bot.delete_message(cid, mid)
+                    await bot.send_message(cid, f"🗑️ ZIP auto-deleted: **{name}.zip**", parse_mode="Markdown")
                 except:
                     pass
 
@@ -1388,6 +1407,23 @@ async def cmd_zip(message: types.Message):
     except Exception as e:
         logger.error(f"ZIP error: {e}")
         await status_msg.edit_text(f"❌ ZIP banane mein error: `{e}`", parse_mode="Markdown")
+
+
+# ============================================================
+# ZIP Delete Callback
+# ============================================================
+@dp.callback_query(F.data.startswith("delzip_"))
+async def delete_zip_callback(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Access Denied!", show_alert=True)
+    try:
+        parts = callback.data.split("_")
+        msg_id = int(parts[1])
+        chat_id = int(parts[2])
+        await bot.delete_message(chat_id, msg_id)
+        await callback.answer("🗑️ ZIP deleted!", show_alert=False)
+    except Exception as e:
+        await callback.answer("❌ Delete nahi ho saka.", show_alert=True)
 
 
 # ============================================================

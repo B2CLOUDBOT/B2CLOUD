@@ -17,7 +17,9 @@ from aiogram.exceptions import TelegramBadRequest
 # CONFIGURATION
 # ============================================================
 IST = ZoneInfo('Asia/Kolkata')
-def now_db():
+
+def now_ist():
+    """Display ke liye IST time"""
     return datetime.now(IST)
 
 def now_db():

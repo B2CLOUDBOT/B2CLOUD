@@ -11,6 +11,10 @@ from aiogram.exceptions import TelegramBadRequest
 # 10) CONFIGURATION & SECURITY
 # ============================================================
 import os
+import io
+import zipfile
+import aiohttp
+import asyncio
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo('Asia/Kolkata')
@@ -1252,6 +1256,138 @@ async def cmd_b2(message: types.Message):
         )
     except:
         pass
+
+
+# ============================================================
+# /zip - Album ki photos+PDFs ka ZIP, videos alag
+# ============================================================
+@dp.message(Command("zip"))
+async def cmd_zip(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer(
+            "❌ Usage: `/zip AlbumName` ya `/zip ALB-xxxxxx`",
+            parse_mode="Markdown"
+        )
+
+    identifier = args[1].strip()
+    album = await find_album(identifier)
+
+    if not album:
+        return await message.answer(f"❌ Album **'{identifier}'** nahi mila.", parse_mode="Markdown")
+
+    files = album.get("photos", [])
+    if not files:
+        return await message.answer("❌ Is album mein koi file nahi hai.", parse_mode="Markdown")
+
+    status_msg = await message.answer(
+        f"⏳ **ZIP ban raha hai...**\n"
+        f"📁 Album: **{album['name']}**\n"
+        f"🖼 Total files: {len(files)}",
+        parse_mode="Markdown"
+    )
+
+    # Separate photos+docs from videos
+    zippable = []  # photos, pdfs, documents
+    videos = []
+
+    for item in files:
+        if isinstance(item, dict):
+            fid, mtype = item["file_id"], item["type"]
+        else:
+            fid, mtype = item, "photo"
+
+        if mtype == "video":
+            videos.append(fid)
+        else:
+            zippable.append((fid, mtype))
+
+    # Download and zip photos+docs
+    zip_buffer = io.BytesIO()
+    zip_buffer.name = f"{album['name']}.zip"
+    failed = 0
+    zipped = 0
+
+    try:
+        with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for idx, (fid, mtype) in enumerate(zippable, 1):
+                try:
+                    tg_file = await bot.get_file(fid)
+                    file_url = f"https://api.telegram.org/file/bot{API_TOKEN}/{tg_file.file_path}"
+
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(file_url) as resp:
+                            if resp.status == 200:
+                                file_data = await resp.read()
+                                # Extension set karo
+                                ext = tg_file.file_path.split(".")[-1] if "." in tg_file.file_path else mtype
+                                filename = f"{idx:03d}_{mtype}.{ext}"
+                                zf.writestr(filename, file_data)
+                                zipped += 1
+                            else:
+                                failed += 1
+                except Exception as e:
+                    logger.error(f"ZIP download error: {e}")
+                    failed += 1
+
+        zip_buffer.seek(0)
+
+        # Send ZIP file
+        if zipped > 0:
+            zip_msg = await bot.send_document(
+                message.chat.id,
+                document=types.BufferedInputFile(
+                    zip_buffer.read(),
+                    filename=f"{album['name']}.zip"
+                ),
+                caption=(
+                    f"📦 **{album['name']}.zip**\n"
+                    f"🖼 Files: {zipped}\n"
+                    f"⚠️ _Yeh ZIP 5 minute mein delete ho jayega!_"
+                ),
+                parse_mode="Markdown"
+            )
+
+            # Auto delete ZIP after 5 minutes
+            async def delete_zip():
+                await asyncio.sleep(300)
+                try:
+                    await bot.delete_message(message.chat.id, zip_msg.message_id)
+                    await message.answer(f"🗑️ ZIP auto-deleted: **{album['name']}.zip**", parse_mode="Markdown")
+                except:
+                    pass
+
+            asyncio.create_task(delete_zip())
+        else:
+            await message.answer("❌ Koi bhi file ZIP nahi ho saki.", parse_mode="Markdown")
+
+        # Send videos separately
+        if videos:
+            await message.answer(
+                f"🎥 **{len(videos)} video(s)** alag se aa rahi hain...",
+                parse_mode="Markdown"
+            )
+            for fid in videos:
+                try:
+                    await bot.send_video(message.chat.id, fid)
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.error(f"Video send error: {e}")
+
+        # Update status
+        summary = f"✅ **Done!**\n📦 ZIP: {zipped} files"
+        if failed:
+            summary += f"\n⚠️ Failed: {failed}"
+        if videos:
+            summary += f"\n🎥 Videos: {len(videos)} alag bheji"
+        await status_msg.edit_text(summary, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"ZIP error: {e}")
+        await status_msg.edit_text(f"❌ ZIP banane mein error: `{e}`", parse_mode="Markdown")
 
 
 # ============================================================

@@ -1260,6 +1260,26 @@ async def cmd_b2(message: types.Message):
 
 
 # ============================================================
+# /id - Get User & Chat ID (Everyone ke liye)
+# ============================================================
+@dp.message(Command("id"))
+async def cmd_id(message: types.Message):
+    user = message.from_user
+    chat = message.chat
+    uname = f"@{user.username}" if user.username else "N/A"
+    user_info = (
+        "\U0001f465 **Your Info:**\n"
+        f"\U0001f194 User ID: `{user.id}`\n"
+        f"\U0001f4db Name: {user.full_name}\n"
+        f"\U0001f517 Username: {uname}\n\n"
+        "\U0001f4ac **Chat Info:**\n"
+        f"\U0001f194 Chat ID: `{chat.id}`\n"
+        f"\U0001f4dd Chat Type: {chat.type}"
+    )
+    await message.answer(user_info, parse_mode="Markdown")
+
+
+# ============================================================
 # UNKNOWN COMMAND HANDLER
 # ============================================================
 @dp.message(F.text.startswith("/"))

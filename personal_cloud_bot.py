@@ -156,22 +156,25 @@ async def cmd_start(message: types.Message):
     # ── Unknown user ─────────────────────────────────────────
     if not is_admin(uid):
         reg_code = await get_or_create_reg_code(uid)
-        # Check if previously granted/denied
+        # Check if denied or previously known
+        is_denied = await db.denied_users.find_one({"user_id": uid}) is not None
         prev = await db.granted_users.find_one({"user_id": uid})
-        is_old = prev is not None
-        emoji_status = "🔄 old" if is_old else "🆕 new"
+        is_old = is_denied or (prev is not None)
+        emoji_status = "🔴 old" if is_old else "🆕 new"
         user = message.from_user
         uname = f"@{user.username}" if user.username else "N/A"
         # Notify owner
+        grant_str = f"@{user.username}" if user.username else str(uid)
         await bot.send_message(
             ADMIN_ID,
-            f"👤 *Unknown /start*\n"
+            f"👤 {user.full_name} /start\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🎫 Code: *{reg_code}*\n"
             f"🆔 User ID: `{uid}`\n"
             f"📛 Name: {user.full_name}\n"
             f"🔗 Username: {uname}\n"
-            f"📊 Status: {emoji_status}",
+            f"📊 Status: {emoji_status}\n"
+            f"✅ Access: `/grant {grant_str}`",
             parse_mode="Markdown"
         )
         # Reply to user
@@ -222,7 +225,8 @@ async def cmd_start(message: types.Message):
             "┣ `/denied <id/@user>` — Access hatao\n"
             "┣ `/grantlist` — Granted users dekho\n"
             "┣ `/grantlistinfo <id>` — User ki history\n"
-            "┗ `/b2list` — Share history dekho"
+            "┣ `/b2list` — Share history dekho\n"
+            "┗ `/deniedlist` — Denied users dekho"
         )
         await message.answer(common + owner_extra, parse_mode="Markdown")
     else:
@@ -1688,15 +1692,29 @@ async def cmd_denied(message: types.Message):
         uid = int(target)
         if uid == ADMIN_ID: return await message.answer("⚠️ Owner ka access nahi hata sakte!")
         granted_users.discard(uid)
+        doc = await db.granted_users.find_one({"user_id": uid})
         r = await db.granted_users.delete_one({"user_id": uid})
-        if r.deleted_count: await message.answer(f"🚫 Access removed!\n🆔 `{uid}`", parse_mode="Markdown")
+        if r.deleted_count:
+            uname_saved = doc.get("username") if doc else None
+            await db.denied_users.update_one(
+                {"user_id": uid},
+                {"$set": {"user_id": uid, "username": uname_saved, "denied_at": now_db()}},
+                upsert=True
+            )
+            await message.answer(f"🚫 Access removed!\n🆔 `{uid}`", parse_mode="Markdown")
         else: await message.answer(f"⚠️ `{uid}` list mein nahi tha.", parse_mode="Markdown")
     elif target.startswith("@"):
         username = target.lstrip("@").lower()
         doc = await db.granted_users.find_one({"username": username})
         if doc:
-            if doc.get("user_id"): granted_users.discard(doc["user_id"])
+            uid_saved = doc.get("user_id")
+            if uid_saved: granted_users.discard(uid_saved)
             await db.granted_users.delete_one({"username": username})
+            await db.denied_users.update_one(
+                {"username": username},
+                {"$set": {"user_id": uid_saved, "username": username, "denied_at": now_db()}},
+                upsert=True
+            )
             await message.answer(f"🚫 @{username} access removed!", parse_mode="Markdown")
         else: await message.answer(f"⚠️ @{username} list mein nahi tha.", parse_mode="Markdown")
     else: await message.answer("❌ Valid ID ya @username dein.", parse_mode="Markdown")
@@ -1708,20 +1726,59 @@ async def cmd_grantlist(message: types.Message):
     if not users: return await message.answer("📋 Koi granted user nahi.", parse_mode="Markdown")
     text = "👥 Granted Users:\n━━━━━━━━━━━━━━━━━━\n\n"
     for u in users:
-        uid   = u.get("user_id")
-        uname = u.get("username")
+        uid_val = u.get("user_id")
+        uname   = u.get("username")
         pending = u.get("pending", False)
         raw_date = u.get("granted_at", now_db())
         if raw_date.tzinfo is None:
             from datetime import timezone
             raw_date = raw_date.replace(tzinfo=timezone.utc)
         date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
-        status = "⏳ Pending" if pending else "✅ Active"
-        uname_line = f"@{uname}" if uname else "Username: nahi mila"
-        uid_line   = f"`{uid}`" if uid else "—"
-        text += f"{status}\n👤 {uname_line}\n🆔 {uid_line}\n📅 {date}\n\n"
+        status     = "⏳ Pending" if pending else "✅ Active"
+        uname_line = f"@{uname}" if uname else "Username: —"
+        uid_line   = f"`{uid_val}`" if uid_val else "—"
+        denied_ref = f"@{uname}" if uname else str(uid_val)
+        text += (
+            f"{status}\n"
+            f"👤 {uname_line}\n"
+            f"🆔 {uid_line}\n"
+            f"📅 {date}\n"
+            f"🚫 `/denied {denied_ref}`\n\n"
+        )
     text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(users)}"
     await message.answer(text, parse_mode="Markdown")
+
+
+# ============================================================
+# /deniedlist
+# ============================================================
+@dp.message(Command("deniedlist"))
+async def cmd_deniedlist(message: types.Message):
+    if not is_owner(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    users = await db.denied_users.find().sort("denied_at", -1).to_list(100)
+    if not users: return await message.answer("📋 Koi denied user nahi.")
+    text = "🚫 Denied Users:\n━━━━━━━━━━━━━━━━━━\n\n"
+    for u in users:
+        uid_val  = u.get("user_id")
+        uname    = u.get("username")
+        raw_date = u.get("denied_at", now_db())
+        if raw_date.tzinfo is None:
+            from datetime import timezone
+            raw_date = raw_date.replace(tzinfo=timezone.utc)
+        date       = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
+        uname_line = f"@{uname}" if uname else "Username: —"
+        uid_line   = f"`{uid_val}`" if uid_val else "—"
+        grant_ref  = f"@{uname}" if uname else str(uid_val)
+        text += (
+            f"🔴 Denied\n"
+            f"👤 {uname_line}\n"
+            f"🆔 {uid_line}\n"
+            f"📅 {date}\n"
+            f"✅ `/grant {grant_ref}`\n\n"
+        )
+    text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(users)}"
+    await message.answer(text, parse_mode="Markdown")
+
 
 @dp.message(Command("grantlistinfo"))
 async def cmd_grantlistinfo(message: types.Message):
@@ -1818,6 +1875,7 @@ async def main():
         await b2_history_col.create_index([("sent_at", -1)])
         await db.reg_codes.create_index([("user_id", 1)], unique=True)
         await db.reg_codes.create_index([("code", 1)], unique=True)
+        await db.denied_users.create_index([("user_id", 1)], unique=True)
         granted_docs = await db.granted_users.find({"user_id": {"$ne": None}, "pending": {"$ne": True}}).to_list(500)
         for doc in granted_docs:
             if doc.get("user_id"): granted_users.add(doc["user_id"])

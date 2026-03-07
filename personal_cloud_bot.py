@@ -48,7 +48,6 @@ async def get_or_create_reg_code(uid: int) -> str:
     existing = await db.reg_codes.find_one({"user_id": uid})
     if existing:
         return existing["code"]
-    # Generate next available code: A1-Z9, then AA1-AZ9 etc.
     count = await db.reg_codes.count_documents({})
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     digits  = "123456789"
@@ -58,7 +57,6 @@ async def get_or_create_reg_code(uid: int) -> str:
         d = digits[count % len(digits)]
         code = f"{l}{d}"
     else:
-        # Extended: AA1, AB1 ...
         count2 = count - total
         l1 = letters[(count2 // (len(letters) * len(digits)))]
         l2 = letters[(count2 // len(digits)) % len(letters)]
@@ -84,7 +82,6 @@ async def find_album(identifier: str):
     })
 
 def auto_generate_tags(name: str) -> list:
-    """Album name se automatic tags generate karo."""
     name_lower = name.lower().strip()
     words = re.split(r'[\s_\-]+', name_lower)
     words = [w for w in words if w and len(w) >= 2]
@@ -111,7 +108,6 @@ def count_media(files):
     return photos, videos, docs, audios
 
 async def send_to_storage(fid: str, mtype: str):
-    """Storage Channel pe file bhejo, (message_id, file_size) return karo."""
     try:
         if mtype == "video":
             msg = await bot.send_video(STORAGE_CHANNEL, fid)
@@ -156,14 +152,12 @@ async def cmd_start(message: types.Message):
     # ── Unknown user ─────────────────────────────────────────
     if not is_admin(uid):
         reg_code = await get_or_create_reg_code(uid)
-        # Check if denied or previously known
         is_denied = await db.denied_users.find_one({"user_id": uid}) is not None
         prev = await db.granted_users.find_one({"user_id": uid})
         is_old = is_denied or (prev is not None)
         emoji_status = "🔴 old" if is_old else "🆕 new"
         user = message.from_user
         uname = f"@{user.username}" if user.username else "N/A"
-        # Notify owner
         grant_str = f"@{user.username}" if user.username else str(uid)
         await bot.send_message(
             ADMIN_ID,
@@ -177,13 +171,12 @@ async def cmd_start(message: types.Message):
             f"✅ Access: `/grant {grant_str}`",
             parse_mode="Markdown"
         )
-        # Reply to user
         await message.answer(
             f"☁️ *Personal Cloud Bot*\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Yeh ek private cloud storage bot hai.\n"
             f"Abhi aapke paas is bot ka access nahi hai.\n\n"
-            f"🆔 `/id` — Apna User ID dekho",
+            f"🆔 /id — Apna User ID dekho",
             parse_mode="Markdown"
         )
         return
@@ -196,14 +189,14 @@ async def cmd_start(message: types.Message):
         "┣ /album `<name>` — Naya album banao\n"
         "┣ /add `<name/id>` — Files add karo\n"
         "┣ /close — Preview & save karo\n"
-        "┣ /save_add — Add session save karo\n"
+        "┣ /save\\_add — Add session save karo\n"
         "┗ /cancel — Session cancel karo\n\n"
         "🗂 *Organize*\n"
         "┣ /lock `<name/id>` — Album lock karo\n"
         "┣ /unlock `<name/id>` — Album unlock karo\n"
         "┣ /rename `<old>` `<new>` — Album rename karo\n"
-        "┣ /merge `<name1>` `<name2>` `<new>` — Merge karo\n"
-        "┣ /tag `<name/id>` `#tag1` — Tags lagao\n"
+        "┣ /merge `<id1>` `<id2>` `<name>` — Merge karo\n"
+        "┣ /tag `<name/id>` `#tag1` `#tag2` — Tags lagao\n"
         "┗ /dlt `<name/id>` — Files selectively hatao\n\n"
         "🔍 *View & Search*\n"
         "┣ /albums — Saare albums dekho\n"
@@ -212,18 +205,19 @@ async def cmd_start(message: types.Message):
         "┣ /info `<name/id>` — Album details\n"
         "┗ /stats — Cloud stats\n\n"
         "📤 *Share & Export*\n"
-        "┣ /b2 `<name/id>` `@user` — Album share karo\n"
+        "┣ /b2 `<id>` `@u1` `@u2` — Album share karo\n"
         "┗ /zip `<name/id>` — ZIP ya forward karo\n\n"
         "🆔 /id — Apna User ID dekho"
     )
 
+    # ── Owner gets extra access section ──────────────────────
     if is_owner(uid):
         owner_extra = (
             "\n\n👑 *Owner Controls*\n"
             "┣ /grant `<id/@user>` — Access do\n"
             "┣ /denied `<id/@user>` — Access hatao\n"
             "┣ /grantlist — Granted users dekho\n"
-            "┣ /grantlistinfo `<id/@user>` — User ki history\n"
+            "┣ /grantlistinfo `<id>` — User ki history\n"
             "┣ /b2list — Share history dekho\n"
             "┗ /deniedlist — Denied users dekho"
         )
@@ -487,7 +481,6 @@ async def process_confirm(callback: types.CallbackQuery):
                 parse_mode="Markdown")
         except: pass
 
-        # Save each file to storage and collect message IDs
         saved_items = []
         for idx, item in enumerate(session["photos"], 1):
             fid = item["file_id"] if isinstance(item, dict) else item
@@ -871,23 +864,18 @@ async def cmd_merge(message: types.Message):
         return await message.answer("❌ Usage: `/merge <name/id1> <name/id2> <NewName>`\n"
                                     "Quoted names ke liye: `/merge \'My Pic\' \'Tag Test\' NewAlbum`", parse_mode="Markdown")
     raw = args[1].strip()
-    # Try quoted first: 'name1' 'name2' newname  or  "name1" "name2" newname
     quoted = re.findall(r"['\"](.*?)['\"]+", raw)
     if len(quoted) >= 2:
         id1 = quoted[0].strip()
         id2 = quoted[1].strip()
-        # new_name = everything after the 2nd quote
         second_quote_end = raw.rfind(quoted[1]) + len(quoted[1]) + 1
         new_name = raw[second_quote_end:].strip().strip("'\"")
         if not new_name:
             return await message.answer("❌ New album ka naam dein.", parse_mode="Markdown")
     else:
-        # No quotes — try to find by scanning: last token = new_name, rest split smartly
-        # Strategy: try each split point, use find_album to detect which works
         tokens = raw.split()
         if len(tokens) < 3:
             return await message.answer("❌ Usage: `/merge <name/id1> <name/id2> <NewName>`", parse_mode="Markdown")
-        # Try: token[0] = id1, rest split for id2+newname
         found = False
         for split1 in range(1, len(tokens) - 1):
             id1_try = " ".join(tokens[:split1])
@@ -937,7 +925,6 @@ async def cmd_tag(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2: return await message.answer("❌ Usage: `/tag <name/id> #tag1 #tag2`", parse_mode="Markdown")
     text = args[1].strip()
-    # Album name = sab kuch pehle #tag se pehle
     tag_match = re.search(r"#\w+", text)
     if not tag_match: return await message.answer("❌ Koi valid tag nahi mila. Use `#tagname`", parse_mode="Markdown")
     album_identifier = text[:tag_match.start()].strip()
@@ -950,10 +937,6 @@ async def cmd_tag(message: types.Message):
     all_tags = list(set(existing_tags + [t.lower() for t in new_tags]))
     await albums_col.update_one({"_id": album["_id"]}, {"$set": {"tags": all_tags, "updated_at": now_db()}})
     await message.answer(f"🏷️ **Tags Updated!**\n📁 **{album['name']}**\nTags: {' '.join(all_tags)}", parse_mode="Markdown")
-
-
-# ============================================================
-
 
 
 # ============================================================
@@ -970,7 +953,6 @@ async def cmd_list(message: types.Message):
         total_files = sum(a.get("count", 0) for a in albums)
         locked_count = sum(1 for a in albums if a.get("locked"))
 
-        # ── Header summary ──────────────────────────────────────
         await message.answer(
             f"☁️ Personal Cloud\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -978,7 +960,6 @@ async def cmd_list(message: types.Message):
             f"━━━━━━━━━━━━━━━━━━"
         )
 
-        # ── One card per album with ZIP + View buttons ───────────
         for alb in albums:
             icon  = "🔒" if alb.get("locked") else "📁"
             aid   = alb.get("album_id") or "N/A"
@@ -1035,18 +1016,15 @@ async def cmd_info(message: types.Message):
     tags = " ".join(album.get("tags", [])) or None
     lock = "🔒 Locked" if album.get("locked") else "🔓 Unlocked"
 
-    # Date in IST
     raw_created = album.get("created_at", now_db())
     if raw_created.tzinfo is None:
         from datetime import timezone
         raw_created = raw_created.replace(tzinfo=timezone.utc)
     created = raw_created.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
 
-    # Created by — username preferred, fallback to backtick ID
     by_username = album.get("created_by_username", "")
     by_str = f"@{by_username}" if by_username else f"`{album.get('created_by', 'N/A')}`"
 
-    # ── Approximate size from file_sizes stored, else estimate ──
     files_list = album.get("photos", [])
     total_size_bytes = sum(f.get("file_size", 0) for f in files_list if isinstance(f, dict))
     if total_size_bytes > 0:
@@ -1057,7 +1035,6 @@ async def cmd_info(message: types.Message):
         else:
             size_str = f"{total_size_bytes / 1024:.0f} KB"
     else:
-        # Estimate: avg photo ~2MB, video ~50MB, doc ~5MB, audio ~4MB
         est = (photos * 2 + videos * 50 + docs * 5 + audios * 4)
         size_str = f"~{est} MB" if est < 1024 else f"~{est/1024:.1f} GB"
 
@@ -1100,7 +1077,7 @@ async def cmd_info(message: types.Message):
 
 
 # ============================================================
-# /view  — /view AlbumName  ya  /view ALB-xxx  ya  /view_ALB-xxx (shortcut)
+# /view
 # ============================================================
 @dp.message(F.text.regexp(r"^/view_[A-Za-z0-9\-]+$"))
 async def view_shortcut(message: types.Message):
@@ -1117,15 +1094,10 @@ async def view_by_id(message: types.Message):
 
     identifier = args[1].strip()
 
-    # ── TAG SEARCH MODE ─────────────────────────────────────
-    # If any word starts with #, treat as tag search
     tags_input = [w.lower() for w in identifier.split() if w.startswith("#")]
     if tags_input:
-        # Match albums that have ALL the given tags (AND logic)
-        # But also partial match: #holi matches #holi, #holi2026, #holi #insta etc.
         query_conditions = []
         for tag in tags_input:
-            # regex match — #holi matches #holi, #holi2026, #holi2026jan etc.
             query_conditions.append({"tags": {"$elemMatch": {"$regex": f"^{re.escape(tag)}", "$options": "i"}}})
 
         cursor = albums_col.find({"$and": query_conditions} if len(query_conditions) > 1 else query_conditions[0]).sort("created_at", -1)
@@ -1171,7 +1143,6 @@ async def view_by_id(message: types.Message):
             await asyncio.sleep(0.05)
         return
 
-    # ── NORMAL MODE — name or ID se seedha files ─────────────
     album = await find_album(identifier)
     if not album:
         return await message.answer(f"❌ Album '{identifier}' nahi mila.")
@@ -1208,15 +1179,8 @@ async def view_by_id(message: types.Message):
     await message.answer(summary)
 
 
-
-
 # ============================================================
 # /zip  —  Smart Export
-#
-#  • size < 20 MB  → download → ZIP (500 MB pe split)
-#                    AlbumName.zip  /  AlbumName_part1.zip …
-#  • size ≥ 20 MB  → Storage Channel se seedha forward
-#  • Koi auto-delete NAHI — ZIP permanently bot chat mein save
 # ============================================================
 @dp.message(F.text.regexp(r"^/zip_[A-Za-z0-9\-]+$"))
 async def zip_shortcut(message: types.Message):
@@ -1241,8 +1205,8 @@ async def cmd_zip(message: types.Message):
     if not files:
         return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
 
-    DOWNLOAD_LIMIT = 20 * 1024 * 1024   # 20 MB — Telegram get_file limit
-    SPLIT_SIZE     = 45 * 1024 * 1024   # 45 MB — Telegram upload limit is 50 MB
+    DOWNLOAD_LIMIT = 20 * 1024 * 1024
+    SPLIT_SIZE     = 45 * 1024 * 1024
     EXT_MAP = {"photo": "jpg", "video": "mp4", "document": "bin", "audio": "mp3", "voice": "ogg"}
 
     status_msg = await message.answer(
@@ -1251,9 +1215,8 @@ async def cmd_zip(message: types.Message):
         parse_mode="Markdown"
     )
 
-    # ── Step 1: Categorise by size ──────────────────────────────
-    small_files = []   # (fid, mtype, fname, tg_file)   → will be zipped
-    large_files = []   # (fid, mtype, fname, channel_msg_id)  → forward directly
+    small_files = []
+    large_files = []
     check_failed = 0
 
     for idx, item in enumerate(files, 1):
@@ -1270,7 +1233,6 @@ async def cmd_zip(message: types.Message):
             else:
                 large_files.append((fid, mtype, fname, channel_msg_id))
         except Exception:
-            # get_file fails for files > 20 MB — treat as large
             if channel_msg_id:
                 large_files.append((fid, mtype, fname, channel_msg_id))
             else:
@@ -1300,7 +1262,6 @@ async def cmd_zip(message: types.Message):
     forwarded      = 0
     fwd_failed     = 0
 
-    # ── Step 2: Download small files ───────────────────────────
     if small_files:
         try:
             await status_msg.edit_text(
@@ -1309,7 +1270,7 @@ async def cmd_zip(message: types.Message):
             )
         except: pass
 
-        downloaded = []   # (safe_name, bytes_data)
+        downloaded = []
 
         for idx, (fid, mtype, fname, tg_file) in enumerate(small_files, 1):
             try:
@@ -1334,7 +1295,6 @@ async def cmd_zip(message: types.Message):
                     )
                 except: pass
 
-        # ── Step 3: Pack into 500 MB split ZIPs ────────────────
         if downloaded:
             try:
                 await status_msg.edit_text(
@@ -1344,14 +1304,13 @@ async def cmd_zip(message: types.Message):
             except: pass
 
             zip_name = re.sub(r'[^\w\s\-]', '', album["name"]).strip().replace(' ', '_') or "album"
-            parts     = []             # list of (BytesIO, file_count)
+            parts     = []
             cur_buf   = io.BytesIO()
             cur_zf    = zipfile.ZipFile(cur_buf, mode='w', compression=zipfile.ZIP_DEFLATED)
             cur_size  = 0
             cur_count = 0
 
             for safe_name, data in downloaded:
-                # Start a new part if adding this file would exceed 500 MB
                 if cur_size + len(data) > SPLIT_SIZE and cur_count > 0:
                     cur_zf.close()
                     cur_buf.seek(0)
@@ -1372,7 +1331,6 @@ async def cmd_zip(message: types.Message):
 
             total_parts = len(parts)
 
-            # ── Step 4: Send each ZIP part (NO timer, permanently saved) ──
             for part_num, (zip_buf, file_count) in enumerate(parts, 1):
                 part_fname = (
                     f"{zip_name}_part{part_num}.zip" if total_parts > 1
@@ -1385,7 +1343,6 @@ async def cmd_zip(message: types.Message):
                         message.chat.id,
                         document=types.BufferedInputFile(zip_buf.read(), filename=part_fname),
                         caption=f"📦 {part_fname}{part_label}\n🗂 {file_count} files | Saved"
-                        # No parse_mode — album name mein special chars ho sakte hain
                     )
                     zip_parts_sent += 1
                     total_zipped   += file_count
@@ -1393,7 +1350,6 @@ async def cmd_zip(message: types.Message):
                     logger.error(f"ZIP send error part {part_num}: {e}")
                     await message.answer(f"ZIP Part {part_num} send nahi hua: {e}")
 
-    # ── Step 5: Forward large files directly ───────────────────
     if large_files:
         await message.answer(
             f"📤 **{len(large_files)} badi file(s)** direct bhej raha hoon (≥20 MB)...",
@@ -1419,7 +1375,6 @@ async def cmd_zip(message: types.Message):
                 fwd_failed += 1
             await asyncio.sleep(0.4)
 
-    # ── Step 6: Final summary ───────────────────────────────────
     final = f"✅ **Done! — {album['name']}**\n\n"
     if zip_parts_sent:
         final += f"📦 ZIP: {zip_parts_sent} part(s) | {total_zipped} files packed\n"
@@ -1433,9 +1388,6 @@ async def cmd_zip(message: types.Message):
         final = "❌ Koi bhi file process nahi ho saki."
 
     await status_msg.edit_text(final, parse_mode="Markdown")
-
-
-
 
 
 # ============================================================
@@ -1477,14 +1429,12 @@ async def cmd_b2(message: types.Message):
     text = args[1].strip()
     tokens = text.split()
     if len(tokens) < 2: return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
-    # Recipients = trailing @username or numeric tokens
     targets_raw = []
     name_tokens = []
     for t in reversed(tokens):
         if t.startswith("@") or t.lstrip("-").isdigit():
             targets_raw.insert(0, t)
         else:
-            # Once we hit a non-recipient token, rest is album name
             name_tokens = tokens[:tokens.index(t) + 1]
             break
     if not targets_raw: return await message.answer("❌ Recipient (@user ya userid) dein.", parse_mode="Markdown")
@@ -1542,19 +1492,16 @@ async def cmd_b2list(message: types.Message):
     if not history: return await message.answer("📋 Koi share history nahi.")
     text = f"📤 Share History all ({total}):\n\n"
     for h in history:
-        # Date in IST
         raw_date = h.get("sent_at", now_db())
         if raw_date.tzinfo is None:
             from datetime import timezone
             raw_date = raw_date.replace(tzinfo=timezone.utc)
         date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
-        # Recipient — username preferred, fallback to ID
         sent_to_name = h.get("sent_to_name", "")
         sent_to_id   = h.get("sent_to", "")
         if sent_to_name and sent_to_name.startswith("@"):
             recipient = sent_to_name
         elif sent_to_id:
-            # Try to get username from granted_users
             doc = await db.granted_users.find_one({"user_id": int(sent_to_id)}) if str(sent_to_id).isdigit() else None
             uname = doc.get("username") if doc else None
             recipient = f"@{uname}" if uname else str(sent_to_id)
@@ -1566,7 +1513,6 @@ async def cmd_b2list(message: types.Message):
             f"🗂 {h.get('files_count', 0)} files\n"
             f"📅 {date}\n\n"
         )
-    # Split if too long
     if len(text) > 4000:
         chunks = []
         chunk = f"📤 Share History all ({total}):\n\n"
@@ -1669,18 +1615,7 @@ async def cmd_grant(message: types.Message):
         if doc and doc.get("user_id"):
             uid = doc["user_id"]
             granted_users.add(uid)
-            # Try to fetch full_name
-            fetched_fullname = doc.get("full_name")
-            if not fetched_fullname:
-                try:
-                    chat = await bot.get_chat(uid)
-                    fetched_fullname = chat.full_name if hasattr(chat, "full_name") else None
-                except: pass
-            await db.granted_users.update_one(
-                {"user_id": uid},
-                {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id, "full_name": fetched_fullname}},
-                upsert=True
-            )
+            await db.granted_users.update_one({"user_id": uid}, {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}}, upsert=True)
             await message.answer(f"✅ **Access Granted!**\n👤 @{username} | 🆔 `{uid}`", parse_mode="Markdown")
             ok = await send_greeting(uid, username)
             if not ok: await message.answer("⚠️ User ko greeting nahi gayi.", parse_mode="Markdown")
@@ -1839,7 +1774,6 @@ async def unknown_command(message: types.Message):
 
 # ============================================================
 # INLINE BUTTON CALLBACKS — do_zip_ / do_view_
-# Tap karte seedha ZIP ya View trigger hota hai
 # ============================================================
 @dp.callback_query(F.data.startswith("do_zip_"))
 async def cb_do_zip(callback: types.CallbackQuery):
@@ -1847,7 +1781,6 @@ async def cb_do_zip(callback: types.CallbackQuery):
         return await callback.answer("🚫 Access Denied!", show_alert=True)
     aid = callback.data.replace("do_zip_", "")
     await callback.answer("📦 ZIP shuru ho raha hai...")
-    # Reuse cmd_zip by simulating message
     callback.message.text = f"/zip {aid}"
     await cmd_zip(callback.message)
 
@@ -1899,29 +1832,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-# ============================================================
-# /fixnames  — existing granted users ka full_name fetch karo
-# ============================================================
-@dp.message(Command("fixnames"))
-async def cmd_fixnames(message: types.Message):
-    if not is_owner(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    users = await db.granted_users.find({"user_id": {"$ne": None}}).to_list(200)
-    updated = skipped = failed = 0
-    for u in users:
-        uid_val = u.get("user_id")
-        if not uid_val: continue
-        if u.get("full_name"):
-            skipped += 1
-            continue
-        try:
-            chat = await bot.get_chat(uid_val)
-            fn = chat.full_name if hasattr(chat, "full_name") else None
-            if fn:
-                await db.granted_users.update_one({"user_id": uid_val}, {"$set": {"full_name": fn}})
-                updated += 1
-        except:
-            failed += 1
-        await asyncio.sleep(0.3)
-    await message.answer(f"✅ Names updated: {updated}\n⏭ Already had name: {skipped}\n❌ Failed: {failed}")

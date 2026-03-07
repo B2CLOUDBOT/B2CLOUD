@@ -19,11 +19,9 @@ from aiogram.exceptions import TelegramBadRequest
 IST = ZoneInfo('Asia/Kolkata')
 
 def now_ist():
-    """Display ke liye IST time"""
     return datetime.now(IST)
 
 def now_db():
-    """MongoDB ke liye timezone-naive datetime"""
     return datetime.now()
 
 API_TOKEN = os.environ["API_TOKEN"]
@@ -60,6 +58,23 @@ async def find_album(identifier: str):
         ]
     })
 
+def auto_generate_tags(name: str) -> list:
+    """Album name se automatic tags generate karo."""
+    name_lower = name.lower().strip()
+    words = re.split(r'[\s_\-]+', name_lower)
+    words = [w for w in words if w and len(w) >= 2]
+    tags = set()
+    for w in words:
+        tags.add(f"#{w}")
+    for i in range(len(words) - 1):
+        tags.add(f"#{words[i]}{words[i+1]}")
+    if len(words) >= 3:
+        tags.add(f"#{''.join(words)}")
+        for i in range(len(words) - 2):
+            tags.add(f"#{words[i]}{words[i+1]}{words[i+2]}")
+    return sorted(tags)
+
+
 def count_media(files):
     photos = videos = docs = audios = 0
     for item in files:
@@ -70,6 +85,29 @@ def count_media(files):
         else: photos += 1
     return photos, videos, docs, audios
 
+async def send_to_storage(fid: str, mtype: str):
+    """Storage Channel pe file bhejo, (message_id, file_size) return karo."""
+    try:
+        if mtype == "video":
+            msg = await bot.send_video(STORAGE_CHANNEL, fid)
+            fsize = msg.video.file_size if msg.video else 0
+        elif mtype == "document":
+            msg = await bot.send_document(STORAGE_CHANNEL, fid)
+            fsize = msg.document.file_size if msg.document else 0
+        elif mtype == "audio":
+            msg = await bot.send_audio(STORAGE_CHANNEL, fid)
+            fsize = msg.audio.file_size if msg.audio else 0
+        elif mtype == "voice":
+            msg = await bot.send_voice(STORAGE_CHANNEL, fid)
+            fsize = msg.voice.file_size if msg.voice else 0
+        else:
+            msg = await bot.send_photo(STORAGE_CHANNEL, fid)
+            fsize = msg.photo[-1].file_size if msg.photo else 0
+        return msg.message_id, fsize
+    except Exception as e:
+        logger.error(f"Storage send error: {e}")
+        return None, 0
+
 
 # ============================================================
 # /start
@@ -78,6 +116,7 @@ def count_media(files):
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
     username = (message.from_user.username or "").lower()
+    first_name = message.from_user.first_name or "there"
 
     if username:
         pending = await db.granted_users.find_one({"username": username, "pending": True})
@@ -85,51 +124,65 @@ async def cmd_start(message: types.Message):
             granted_users.add(uid)
             await db.granted_users.update_one(
                 {"username": username},
-                {"$set": {"user_id": uid, "pending": False}}
+                {"$set": {"user_id": uid, "username": username, "pending": False}}
             )
             logger.info(f"✅ Pending grant activated: @{username} = {uid}")
 
+    # ── Unknown user ─────────────────────────────────────────
     if not is_admin(uid):
-        return await message.answer("🚫 Access Denied!")
+        await message.answer(
+            f"👋 Hey {first_name}!\n\n"
+            f"☁️ *Personal Cloud Bot*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Yeh ek private cloud storage bot hai.\n"
+            f"Abhi aapke paas is bot ka access nahi hai.\n\n"
+            f"🆔 `/id` — Apna User ID dekho",
+            parse_mode="Markdown"
+        )
+        return
 
-    text = (
-        "☁️ **Personal Cloud Bot**\n"
+    # ── Common commands (owner + granted both) ────────────────
+    common = (
+        "☁️ *Personal Cloud Bot*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📁 **Album Management**\n"
-        "`/album <name>` — Naya album banayein\n"
-        "`/add <name/id>` — Photos add karein\n"
-        "`/close` — Album preview & save\n"
-        "`/save_add` — Add session save karein\n"
-        "`/cancel` — Session cancel karein\n\n"
-        "🔧 **Organize**\n"
-        "`/lock <name/id>` — Album lock karein\n"
-        "`/unlock <name/id>` — Album unlock karein\n"
-        "`/rename <old> <new>` — Album rename karein\n"
-        "`/delete <name/id>` — Album delete karein\n"
-        "`/merge <id1> <id2> <name>` — 2 albums combine karein\n"
-        "`/duplicate <id> <name>` — Album copy karein\n"
-        "`/tag <id> #tag1 #tag2` — Tags add karein\n"
-        "`/dlt <name/id>` — Selective file delete\n\n"
-        "🔍 **View & Search**\n"
-        "`/albums` — Saare albums list karein\n"
-        "`/search <name/id/#tag>` — Album search karein\n"
-        "`/view_<id>` — Album files dekhein\n"
-        "`/info <name/id>` — Album full details\n"
-        "`/stats` — Cloud stats\n"
-        "`/recent` — Last 5 updated albums\n\n"
-        "📤 **Share**\n"
-        "`/b2 <id> <@user/userid>` — Album kisi ko bhejein\n"
-        "`/b2 <id> @u1 @u2 @u3` — Multiple logon ko bhejein\n"
-        "`/b2list` — Share history dekhein\n"
-        "`/zip <name/id>` — ZIP file banayein\n\n"
-        "👥 **Access (Owner only)**\n"
-        "`/grant <id/@user>` — Access dein\n"
-        "`/denied <id/@user>` — Access hatayein\n"
-        "`/grantlist` — Granted users list\n"
-        "`/grantlistinfo <userid>` — User ki album history\n\n"
-        "🆔 `/id` — Apna User ID dekhein"
+        "📁 *Album Management*\n"
+        "┣ `/album <name>` — Naya album banao\n"
+        "┣ `/add <name/id>` — Files add karo\n"
+        "┣ `/close` — Preview & save karo\n"
+        "┣ `/save_add` — Add session save karo\n"
+        "┗ `/cancel` — Session cancel karo\n\n"
+        "🗂 *Organize*\n"
+        "┣ `/lock <name/id>` — Album lock karo\n"
+        "┣ `/unlock <name/id>` — Album unlock karo\n"
+        "┣ `/rename <old> <new>` — Album rename karo\n"
+        "┣ `/merge <id1> <id2> <name>` — Merge karo\n"
+        "┣ `/tag <name/id> #tag1 #tag2` — Tags lagao\n"
+        "┗ `/dlt <name/id>` — Files selectively hatao\n\n"
+        "🔍 *View & Search*\n"
+        "┣ `/albums` — Saare albums dekho\n"
+        "┣ `/view <name/id>` — Album files dekho\n"
+        "┣ `/view #tag1 #tag2` — Tag se search karo\n"
+        "┣ `/info <name/id>` — Album details\n"
+        "┗ `/stats` — Cloud stats\n\n"
+        "📤 *Share & Export*\n"
+        "┣ `/b2 <id> @u1 @u2` — Album share karo\n"
+        "┗ `/zip <name/id>` — ZIP ya forward karo\n\n"
+        "🆔 `/id` — Apna User ID dekho"
     )
-    await message.answer(text, parse_mode="Markdown")
+
+    # ── Owner gets extra access section ──────────────────────
+    if is_owner(uid):
+        owner_extra = (
+            "\n\n👑 *Owner Controls*\n"
+            "┣ `/grant <id/@user>` — Access do\n"
+            "┣ `/denied <id/@user>` — Access hatao\n"
+            "┣ `/grantlist` — Granted users dekho\n"
+            "┣ `/grantlistinfo <id>` — User ki history\n"
+            "┗ `/b2list` — Share history dekho"
+        )
+        await message.answer(common + owner_extra, parse_mode="Markdown")
+    else:
+        await message.answer(common, parse_mode="Markdown")
 
 
 # ============================================================
@@ -175,93 +228,78 @@ async def cmd_album(message: types.Message):
 # ============================================================
 # MEDIA HANDLER
 # ============================================================
-async def _handle_media(message: types.Message, file_id: str, unique_id: str, media_type: str, fname: str = ""):
+async def _handle_media(message: types.Message, file_id: str, unique_id: str, media_type: str, fname: str = "", file_size: int = 0):
     uid = message.from_user.id
     if uid not in user_sessions:
         return
-
     session = user_sessions[uid]
     if unique_id in session["ids"]:
         return await message.reply(f"🚫 Duplicate {media_type}! Skip kar diya.")
-
-    session["photos"].append({"file_id": file_id, "type": media_type, "name": fname})
+    session["photos"].append({"file_id": file_id, "type": media_type, "name": fname, "file_size": file_size})
     session["ids"].add(unique_id)
-    count = len(session["photos"])
-
-    pass  # No feedback on each photo
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     if message.from_user.id not in user_sessions: return
     p = message.photo[-1]
-    await _handle_media(message, p.file_id, p.file_unique_id, "photo")
+    await _handle_media(message, p.file_id, p.file_unique_id, "photo", file_size=p.file_size or 0)
 
 @dp.message(F.video)
 async def handle_video(message: types.Message):
     if message.from_user.id not in user_sessions: return
-    await _handle_media(message, message.video.file_id, message.video.file_unique_id, "video")
+    await _handle_media(message, message.video.file_id, message.video.file_unique_id, "video", file_size=message.video.file_size or 0)
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if message.from_user.id not in user_sessions: return
     d = message.document
-    await _handle_media(message, d.file_id, d.file_unique_id, "document", d.file_name or "")
+    await _handle_media(message, d.file_id, d.file_unique_id, "document", d.file_name or "", file_size=d.file_size or 0)
 
 @dp.message(F.audio)
 async def handle_audio(message: types.Message):
     if message.from_user.id not in user_sessions: return
-    await _handle_media(message, message.audio.file_id, message.audio.file_unique_id, "audio")
+    await _handle_media(message, message.audio.file_id, message.audio.file_unique_id, "audio", file_size=message.audio.file_size or 0)
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     if message.from_user.id not in user_sessions: return
-    await _handle_media(message, message.voice.file_id, message.voice.file_unique_id, "voice")
+    await _handle_media(message, message.voice.file_id, message.voice.file_unique_id, "voice", file_size=message.voice.file_size or 0)
 
 
+# ============================================================
 # Quick action callbacks
+# ============================================================
 @dp.callback_query(F.data == "quick_close")
 async def quick_close(callback: types.CallbackQuery):
     await callback.answer()
     uid = callback.from_user.id
     if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
         return await callback.message.answer("⚠️ Koi active album creation session nahi hai.")
-
     session = user_sessions[uid]
     if not session["photos"]:
         del user_sessions[uid]
         return await callback.message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
-
     auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
     duration = (now_ist() - session["started_at"]).seconds // 60
     photos, videos, docs, audios = count_media(session["photos"])
-
     stats = ""
     if photos: stats += f"📸 {photos} photos\n"
     if videos: stats += f"🎥 {videos} videos\n"
     if docs: stats += f"📄 {docs} documents\n"
     if audios: stats += f"🎵 {audios} audio\n"
-
     preview_caption = (
-        f"📝 **ALBUM PREVIEW**\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📁 Name: **{session['name']}**\n"
-        f"🆔 ID: `{auto_id}`\n"
-        f"{stats}"
-        f"⏱ Session: ~{duration} min\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Save karna chahte hain?"
+        f"📝 **ALBUM PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
+        f"📁 Name: **{session['name']}**\n🆔 ID: `{auto_id}`\n{stats}"
+        f"⏱ Session: ~{duration} min\n━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
     )
-
     builder = InlineKeyboardBuilder()
     builder.row(
         types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
     )
-
     first = session["photos"][0]
     fid = first["file_id"] if isinstance(first, dict) else first
     mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
-
     try:
         if mtype == "video":
             await bot.send_video(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -279,31 +317,30 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
     uid = callback.from_user.id
     if uid not in user_sessions or user_sessions[uid]["mode"] != "add":
         return await callback.message.answer("⚠️ Koi active add session nahi hai.")
-    # Reuse save_add logic inline
     session = user_sessions[uid]
     if not session["photos"]:
         del user_sessions[uid]
         return await callback.message.answer("⚠️ Koi file nahi bheji.")
-
     new_count = len(session["photos"])
     new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
+    saved_items = []
+    for item in session["photos"]:
+        fid = item["file_id"] if isinstance(item, dict) else item
+        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+        mid, fsize = await send_to_storage(fid, mtype)
+        new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+        if mid: new_item["storage_msg_id"] = mid
+        if fsize: new_item["file_size"] = fsize
+        saved_items.append(new_item)
+        await asyncio.sleep(0.2)
     await albums_col.update_one(
         {"_id": session["db_id"]},
         {
-            "$push": {"photos": {"$each": session["photos"]}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
+            "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
             "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
             "$set": {"updated_at": now_db()}
         }
     )
-    for item in session["photos"]:
-        fid = item["file_id"] if isinstance(item, dict) else item
-        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-        try:
-            if mtype == "video": await bot.send_video(STORAGE_CHANNEL, fid)
-            elif mtype == "document": await bot.send_document(STORAGE_CHANNEL, fid)
-            else: await bot.send_photo(STORAGE_CHANNEL, fid)
-            await asyncio.sleep(0.2)
-        except: pass
     await callback.message.answer(f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**", parse_mode="Markdown")
     del user_sessions[uid]
 
@@ -324,45 +361,32 @@ async def cmd_close(message: types.Message):
     uid = message.from_user.id
     if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
         return await message.answer("⚠️ Koi active album creation session nahi hai.")
-    
     logger.info(f"cmd_close called by {uid}, session photos: {len(user_sessions[uid].get('photos', []))}")
-
     session = user_sessions[uid]
     if not session["photos"]:
         del user_sessions[uid]
         return await message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
-
     auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
     duration = (now_db() - session["started_at"]).seconds // 60
     photos, videos, docs, audios = count_media(session["photos"])
-
     stats = ""
     if photos: stats += f"📸 {photos} photos\n"
     if videos: stats += f"🎥 {videos} videos\n"
     if docs: stats += f"📄 {docs} documents\n"
     if audios: stats += f"🎵 {audios} audio\n"
-
     preview_caption = (
-        f"📝 **ALBUM PREVIEW**\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📁 Name: **{session['name']}**\n"
-        f"🆔 ID: `{auto_id}`\n"
-        f"{stats}"
-        f"⏱ Session: ~{duration} min\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Save karna chahte hain?"
+        f"📝 **ALBUM PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
+        f"📁 Name: **{session['name']}**\n🆔 ID: `{auto_id}`\n{stats}"
+        f"⏱ Session: ~{duration} min\n━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
     )
-
     builder = InlineKeyboardBuilder()
     builder.row(
         types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
     )
-
     first = session["photos"][0]
     fid = first["file_id"] if isinstance(first, dict) else first
     mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
-
     try:
         if mtype == "video":
             await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -396,91 +420,88 @@ async def process_confirm(callback: types.CallbackQuery):
     if callback.data == "confirm_save":
         album_id = f"ALB-{now_ist().strftime('%y%m%d%H%M%S')}"
         photos, videos, docs, audios = count_media(session["photos"])
+
+        await callback.answer("⏳ Saving...")
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except: pass
+
+        save_msg = await callback.message.answer(
+            f"⏳ **Saving album...**\n📁 {session['name']}\n_Files storage pe upload ho rahi hain..._",
+            parse_mode="Markdown"
+        )
+
+        user = callback.from_user
+        user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
+
+        try:
+            await bot.send_message(STORAGE_CHANNEL,
+                f"📁 **Album Created**\nName: {session['name']}\nCreated by: {user_info}",
+                parse_mode="Markdown")
+        except: pass
+
+        # Save each file to storage and collect message IDs
+        saved_items = []
+        for idx, item in enumerate(session["photos"], 1):
+            fid = item["file_id"] if isinstance(item, dict) else item
+            mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+            mid, fsize = await send_to_storage(fid, mtype)
+            new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+            if mid: new_item["storage_msg_id"] = mid
+            if fsize: new_item["file_size"] = fsize
+            saved_items.append(new_item)
+            await asyncio.sleep(0.2)
+            if idx % 10 == 0:
+                try:
+                    await save_msg.edit_text(
+                        f"⏳ Uploading... {idx}/{len(session['photos'])}\n📁 {session['name']}",
+                        parse_mode="Markdown"
+                    )
+                except: pass
+
         album_doc = {
             "album_id": album_id,
             "name": session["name"],
-            "photos": session["photos"],
-            "count": len(session["photos"]),
+            "photos": saved_items,
+            "count": len(saved_items),
             "locked": False,
-            "tags": [],
+            "tags": auto_generate_tags(session["name"]),
             "created_by": uid,
             "created_by_username": callback.from_user.username or "",
             "created_at": now_db(),
             "updated_at": now_db(),
-            "history": [{
-                "action": "created",
-                "count": len(session["photos"]),
-                "by": uid,
-                "at": now_db()
-            }],
+            "history": [{"action": "created", "count": len(saved_items), "by": uid, "at": now_db()}],
             "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}
         }
 
         try:
             await albums_col.insert_one(album_doc)
-            user = callback.from_user
-            user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
-
-            await bot.send_message(STORAGE_CHANNEL,
-                f"📁 **Album Created**\nName: {session['name']}\nCreated by: {user_info}",
-                parse_mode="Markdown")
-
-            for item in session["photos"]:
-                fid = item["file_id"] if isinstance(item, dict) else item
-                mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-                try:
-                    if mtype == "video": await bot.send_video(STORAGE_CHANNEL, fid)
-                    elif mtype == "document": await bot.send_document(STORAGE_CHANNEL, fid)
-                    elif mtype == "audio": await bot.send_audio(STORAGE_CHANNEL, fid)
-                    elif mtype == "voice": await bot.send_voice(STORAGE_CHANNEL, fid)
-                    else: await bot.send_photo(STORAGE_CHANNEL, fid)
-                    await asyncio.sleep(0.2)
-                except Exception as ex:
-                    logger.error(f"Channel send error: {ex}")
-
             stats_text = ""
             if photos: stats_text += f"📸 {photos} "
             if videos: stats_text += f"🎥 {videos} "
             if docs: stats_text += f"📄 {docs} "
-
-            await bot.send_message(STORAGE_CHANNEL,
-                f"✅ **Album Saved & Stored**\n"
-                f"🆔 ID: `{album_id}`\n"
-                f"📁 Name: {session['name']}\n"
-                f"🗂 Files: {len(session['photos'])} ({stats_text.strip()})\n"
-                f"🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
-                parse_mode="Markdown")
-
-            # Remove buttons from preview
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
+                await bot.send_message(STORAGE_CHANNEL,
+                    f"✅ **Album Saved & Stored**\n🆔 ID: `{album_id}`\n📁 Name: {session['name']}\n"
+                    f"🗂 Files: {len(saved_items)} ({stats_text.strip()})\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
+                    parse_mode="Markdown")
             except: pass
 
-            await callback.answer("✅ Saved!")
-            await callback.message.answer(
-                f"✅ **Album Saved Successfully!**\n\n"
-                f"📁 Name: **{session['name']}**\n"
-                f"🆔 ID: `{album_id}`\n"
-                f"🗂 Files: {len(session['photos'])}\n"
-                f"👁 /view_{album_id} se dekh sakte hain",
+            await save_msg.edit_text(
+                f"✅ **Album Saved Successfully!**\n\n📁 Name: **{session['name']}**\n"
+                f"🆔 ID: `{album_id}`\n🗂 Files: {len(saved_items)}\n👁 /view_{album_id} se dekh sakte hain",
                 parse_mode="Markdown"
             )
-
         except Exception as e:
             logger.error(f"Save error: {e}")
-            # Check if album was actually saved despite error
             saved = await albums_col.find_one({"album_id": album_id})
             if saved:
-                await callback.message.answer(
-                    f"✅ **Album Saved Successfully!**\n\n"
-                    f"📁 Name: **{session['name']}**\n"
-                    f"🆔 ID: `{album_id}`\n"
-                    f"🗂 Files: {len(session['photos'])}\n"
-                    f"👁 /view_{album_id} se dekh sakte hain",
+                await save_msg.edit_text(
+                    f"✅ **Album Saved!**\n📁 **{session['name']}**\n🆔 `{album_id}`",
                     parse_mode="Markdown"
                 )
             else:
-                await callback.message.answer("❌ Save error. Retry karein.")
+                await save_msg.edit_text("❌ Save error. Retry karein.")
     else:
         await callback.answer("❌ Cancelled")
         try:
@@ -498,31 +519,25 @@ async def process_confirm(callback: types.CallbackQuery):
 async def cmd_add(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
-
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         return await message.answer("❌ Usage: `/add AlbumName` ya `/add ALB-xxx`", parse_mode="Markdown")
-
     name = args[1].strip()
     album = await find_album(name)
     if not album:
         return await message.answer(f"❌ **'{name}'** nahi mila.", parse_mode="Markdown")
     if album.get("locked"):
         return await message.answer(f"🔒 **'{album['name']}'** locked hai! Pehle `/unlock` karein.", parse_mode="Markdown")
-
     if message.from_user.id in user_sessions:
         del user_sessions[message.from_user.id]
-
     user_sessions[message.from_user.id] = {
         "mode": "add", "db_id": album["_id"],
         "album_id": album["album_id"], "name": album["name"],
         "photos": [], "ids": set(album.get("photo_unique_ids", [])),
         "started_at": now_db()
     }
-
     await message.answer(
-        f"➕ **Adding to: {album['name']}**\n"
-        f"🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
+        f"➕ **Adding to: {album['name']}**\n🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
         f"Files bhejein, phir `/save_add`\n❌ Cancel: `/cancel`",
         parse_mode="Markdown"
     )
@@ -536,73 +551,46 @@ async def save_add(message: types.Message):
     uid = message.from_user.id
     if uid not in user_sessions or user_sessions[uid]["mode"] != "add":
         return await message.answer("⚠️ Koi active add session nahi hai.")
-
     session = user_sessions[uid]
     if not session["photos"]:
         del user_sessions[uid]
         return await message.answer("⚠️ Koi file nahi bheji. Session cancel.")
-
     try:
         new_count = len(session["photos"])
         new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
-
-        await albums_col.update_one(
-            {"_id": session["db_id"]},
-            {
-                "$push": {
-                    "photos": {"$each": session["photos"]},
-                    "history": {
-                        "action": "added",
-                        "count": new_count,
-                        "by": uid,
-                        "at": now_db()
-                    }
-                },
-                "$inc": {
-                    "count": new_count,
-                    "media_count.photos": new_photos,
-                    "media_count.videos": new_videos,
-                    "media_count.docs": new_docs,
-                    "media_count.audios": new_audios
-                },
-                "$set": {"updated_at": now_db()}
-            }
-        )
-
         user = message.from_user
         user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
-
-        await bot.send_message(STORAGE_CHANNEL,
-            f"📁 **Photos Added**\nName: {session['name']}\nBy: {user_info}",
-            parse_mode="Markdown")
-
+        try:
+            await bot.send_message(STORAGE_CHANNEL, f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}", parse_mode="Markdown")
+        except: pass
+        saved_items = []
         for item in session["photos"]:
             fid = item["file_id"] if isinstance(item, dict) else item
             mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-            try:
-                if mtype == "video": await bot.send_video(STORAGE_CHANNEL, fid)
-                elif mtype == "document": await bot.send_document(STORAGE_CHANNEL, fid)
-                elif mtype == "audio": await bot.send_audio(STORAGE_CHANNEL, fid)
-                else: await bot.send_photo(STORAGE_CHANNEL, fid)
-                await asyncio.sleep(0.2)
-            except Exception as ex:
-                logger.error(f"Channel add error: {ex}")
-
-        await bot.send_message(STORAGE_CHANNEL,
-            f"➕ **Photos Added**\n"
-            f"📁 {session['name']} | 🆔 `{session['album_id']}`\n"
-            f"🗂 +{new_count} files\n"
-            f"🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
-            parse_mode="Markdown")
-
-        await message.answer(
-            f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**",
-            parse_mode="Markdown"
+            mid, fsize = await send_to_storage(fid, mtype)
+            new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+            if mid: new_item["storage_msg_id"] = mid
+            if fsize: new_item["file_size"] = fsize
+            saved_items.append(new_item)
+            await asyncio.sleep(0.2)
+        await albums_col.update_one(
+            {"_id": session["db_id"]},
+            {
+                "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
+                "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
+                "$set": {"updated_at": now_db()}
+            }
         )
+        try:
+            await bot.send_message(STORAGE_CHANNEL,
+                f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
+                f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
+                parse_mode="Markdown")
+        except: pass
+        await message.answer(f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"save_add error: {e}")
         await message.answer("❌ Save error. Retry karein.")
-
     del user_sessions[uid]
 
 
@@ -638,22 +626,14 @@ async def cmd_rename(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     parts = message.text.split(maxsplit=1)
     text = parts[1].strip() if len(parts) > 1 else ""
-    # Support single quotes, double quotes, or plain words
     quoted = re.findall(r"['\"](.*?)['\"]+", text)
     if len(quoted) >= 2:
         old_name, new_name = quoted[0].strip(), quoted[1].strip()
     else:
         simple = text.split()
         if len(simple) < 2:
-            return await message.answer(
-                "❌ Usage:\n"
-                "`/rename OldName NewName`\n"
-                "`/rename 'Old Name' 'New Name'`\n"
-                "`/rename ALB-xxx NewName`",
-                parse_mode="Markdown"
-            )
+            return await message.answer("❌ Usage:\n`/rename OldName NewName`\n`/rename 'Old Name' 'New Name'`\n`/rename ALB-xxx NewName`", parse_mode="Markdown")
         old_name, new_name = simple[0], simple[1]
-
     album = await find_album(old_name)
     if not album: return await message.answer(f"❌ **'{old_name}'** nahi mila.", parse_mode="Markdown")
     conflict = await albums_col.find_one({"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}})
@@ -672,16 +652,13 @@ async def cmd_delete(message: types.Message):
     if len(args) < 2: return await message.answer("❌ Usage: `/delete AlbumName`", parse_mode="Markdown")
     album = await find_album(args[1].strip())
     if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
-
     builder = InlineKeyboardBuilder()
     builder.row(
         types.InlineKeyboardButton(text="🗑️ Haan, Delete", callback_data=f"del_yes_{album['album_id']}"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="del_no")
     )
     await message.answer(
-        f"⚠️ **Delete Confirmation**\n\n"
-        f"📁 **{album['name']}**\n🆔 `{album['album_id']}`\n🗂 {album['count']} files\n\n"
-        f"Yeh action **undo nahi** ho sakta!",
+        f"⚠️ **Delete Confirmation**\n\n📁 **{album['name']}**\n🆔 `{album['album_id']}`\n🗂 {album['count']} files\n\nYeh action **undo nahi** ho sakta!",
         reply_markup=builder.as_markup(), parse_mode="Markdown"
     )
 
@@ -694,9 +671,9 @@ async def process_delete(callback: types.CallbackQuery):
     album_id = callback.data.replace("del_yes_", "")
     result = await albums_col.delete_one({"album_id": album_id})
     if result.deleted_count:
-        await bot.send_message(STORAGE_CHANNEL,
-            f"🗑️ **Album Deleted**\nID: `{album_id}`\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
-            parse_mode="Markdown")
+        try:
+            await bot.send_message(STORAGE_CHANNEL, f"🗑️ **Album Deleted**\nID: `{album_id}`\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST", parse_mode="Markdown")
+        except: pass
         await callback.message.edit_text(f"🗑️ Album deleted!\nID: `{album_id}`", parse_mode="Markdown")
     else:
         await callback.message.edit_text("❌ Delete nahi ho saka.", parse_mode="Markdown")
@@ -711,85 +688,58 @@ async def cmd_dlt(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2: return await message.answer("❌ Usage: `/dlt AlbumName` ya `/dlt ALB-xxx`", parse_mode="Markdown")
-
     album = await find_album(args[1].strip())
     if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
     if album.get("locked"): return await message.answer("🔒 Album locked hai!", parse_mode="Markdown")
-
     files = album.get("photos", [])
     if not files: return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
-
-    # Store dlt session
     user_sessions[message.from_user.id] = {
-        "mode": "dlt",
-        "album_id": album["album_id"],
-        "album_name": album["name"],
-        "files": files,
-        "selected": set()  # indices to delete
+        "mode": "dlt", "album_id": album["album_id"],
+        "album_name": album["name"], "files": files, "selected": set()
     }
-
     await message.answer(
-        f"🗑️ **Selective Delete: {album['name']}**\n"
-        f"🗂 {len(files)} files\n\n"
-        f"Ab files bhej raha hoon — har ek ke niche ✅/❌ button hoga.\n"
-        f"❌ wali files delete hongi.",
+        f"🗑️ **Selective Delete: {album['name']}**\n🗂 {len(files)} files\n\nAb files bhej raha hoon — har ek ke niche ✅/❌ button hoga.",
         parse_mode="Markdown"
     )
-
-    # Send all files with toggle buttons
     for idx, item in enumerate(files):
         fid = item["file_id"] if isinstance(item, dict) else item
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
         kb = InlineKeyboardBuilder()
         kb.button(text="✅ Keep", callback_data=f"dlt_toggle_{album['album_id']}_{idx}_keep")
-
         caption = f"File #{idx+1} | {mtype}"
         try:
             if mtype == "video": await bot.send_video(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
             elif mtype == "document": await bot.send_document(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
             else: await bot.send_photo(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
-        except:
-            pass
+        except: pass
         await asyncio.sleep(0.3)
-
-    # Bottom action buttons
     action_kb = InlineKeyboardBuilder()
     action_kb.row(
         types.InlineKeyboardButton(text="👁 Preview Deletions", callback_data=f"dlt_preview_{album['album_id']}"),
         types.InlineKeyboardButton(text="💾 Save Changes", callback_data=f"dlt_save_{album['album_id']}"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="dlt_cancel")
     )
-    await message.answer(
-        "⬆️ Files dekhein — **✅ Keep** pe click karein woh delete karne ke liye (❌ red ho jayega).\n"
-        "Phir **Save Changes** dabayein.",
-        reply_markup=action_kb.as_markup(), parse_mode="Markdown"
-    )
+    await message.answer("⬆️ **✅ Keep** pe click karein delete karne ke liye.\nPhir **Save Changes** dabayein.", reply_markup=action_kb.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("dlt_toggle_"))
 async def dlt_toggle(callback: types.CallbackQuery):
     uid = callback.from_user.id
     if uid not in user_sessions or user_sessions[uid].get("mode") != "dlt":
         return await callback.answer("Session expire ho gaya.", show_alert=True)
-
     parts = callback.data.split("_")
-    idx = int(parts[-2])  # second to last: dlt_toggle_ALB-xxx_IDX_keep/del
+    idx = int(parts[-2])
     session = user_sessions[uid]
-
     if idx in session["selected"]:
         session["selected"].discard(idx)
-        new_btn = "✅ Keep"
-        new_cb = f"dlt_toggle_{session['album_id']}_{idx}_keep"
+        new_btn, new_cb = "✅ Keep", f"dlt_toggle_{session['album_id']}_{idx}_keep"
     else:
         session["selected"].add(idx)
-        new_btn = "❌ Delete"
-        new_cb = f"dlt_toggle_{session['album_id']}_{idx}_del"
-
+        new_btn, new_cb = "❌ Delete", f"dlt_toggle_{session['album_id']}_{idx}_del"
     kb = InlineKeyboardBuilder()
     kb.button(text=new_btn, callback_data=new_cb)
     try:
         await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
-    except:
-        pass
+    except: pass
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("dlt_preview_"))
@@ -804,9 +754,7 @@ async def dlt_preview(callback: types.CallbackQuery):
     keep_nums = sorted([i+1 for i in range(len(session["files"])) if i not in session["selected"]])
     await callback.answer()
     await callback.message.answer(
-        f"👁 **Delete Preview**\n\n"
-        f"❌ Delete hongi: {', '.join(map(str, del_nums))}\n"
-        f"✅ Raheingi: {', '.join(map(str, keep_nums))}",
+        f"👁 **Delete Preview**\n\n❌ Delete hongi: {', '.join(map(str, del_nums))}\n✅ Raheingi: {', '.join(map(str, keep_nums))}",
         parse_mode="Markdown"
     )
 
@@ -818,11 +766,8 @@ async def dlt_save(callback: types.CallbackQuery):
     session = user_sessions[uid]
     if not session["selected"]:
         return await callback.answer("Koi file select nahi ki.", show_alert=True)
-
     del_nums = sorted([i+1 for i in session["selected"]])
     keep_nums = sorted([i+1 for i in range(len(session["files"])) if i not in session["selected"]])
-    album_name = session["album_name"]
-
     kb = InlineKeyboardBuilder()
     kb.row(
         types.InlineKeyboardButton(text="🗑️ Haan, Delete Karo", callback_data=f"dlt_confirm_{session['album_id']}"),
@@ -830,11 +775,8 @@ async def dlt_save(callback: types.CallbackQuery):
     )
     await callback.answer()
     await callback.message.answer(
-        f"⚠️ **Delete Confirmation**\n\n"
-        f"📁 Album: **{album_name}**\n"
-        f"❌ Delete: File {', '.join(map(str, del_nums))}\n"
-        f"✅ Raheingi: File {', '.join(map(str, keep_nums))}\n\n"
-        f"Kya aap sure hain? Yeh action **undo nahi** ho sakta!",
+        f"⚠️ **Delete Confirmation**\n\n📁 Album: **{session['album_name']}**\n"
+        f"❌ Delete: File {', '.join(map(str, del_nums))}\n✅ Raheingi: File {', '.join(map(str, keep_nums))}\n\nKya aap sure hain? Yeh action **undo nahi** ho sakta!",
         reply_markup=kb.as_markup(), parse_mode="Markdown"
     )
 
@@ -844,40 +786,21 @@ async def dlt_confirm(callback: types.CallbackQuery):
     if uid not in user_sessions or user_sessions[uid].get("mode") != "dlt":
         return await callback.answer("Session expire.", show_alert=True)
     session = user_sessions[uid]
-    album_id = session["album_id"]
-    files = session["files"]
-    selected = session["selected"]
-
-    new_files = [f for i, f in enumerate(files) if i not in selected]
-    del_count = len(selected)
-
+    new_files = [f for i, f in enumerate(session["files"]) if i not in session["selected"]]
+    del_count = len(session["selected"])
     photos, videos, docs, audios = count_media(new_files)
     await albums_col.update_one(
-        {"album_id": album_id},
+        {"album_id": session["album_id"]},
         {
-            "$set": {
-                "photos": new_files,
-                "count": len(new_files),
-                "updated_at": now_db(),
-                "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}
-            },
-            "$push": {
-                "history": {
-                    "action": "deleted",
-                    "count": -del_count,
-                    "by": uid,
-                    "at": now_db()
-                }
-            }
+            "$set": {"photos": new_files, "count": len(new_files), "updated_at": now_db(),
+                     "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}},
+            "$push": {"history": {"action": "deleted", "count": -del_count, "by": uid, "at": now_db()}}
         }
     )
-
     del user_sessions[uid]
     await callback.answer("🗑️ Done!")
     await callback.message.edit_text(
-        f"✅ **{del_count} files delete ho gayi!**\n"
-        f"📁 Album: **{session['album_name']}**\n"
-        f"🗂 Remaining: {len(new_files)} files",
+        f"✅ **{del_count} files delete ho gayi!**\n📁 Album: **{session['album_name']}**\n🗂 Remaining: {len(new_files)} files",
         parse_mode="Markdown"
     )
 
@@ -896,39 +819,64 @@ async def dlt_cancel(callback: types.CallbackQuery):
 @dp.message(Command("merge"))
 async def cmd_merge(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=3)
-    if len(args) < 4:
-        return await message.answer("❌ Usage: `/merge ALB-xxx ALB-yyy NewAlbumName`", parse_mode="Markdown")
-
-    a1 = await find_album(args[1].strip())
-    a2 = await find_album(args[2].strip())
-    new_name = args[3].strip()
-
-    if not a1: return await message.answer(f"❌ Album 1 '{args[1]}' nahi mila.", parse_mode="Markdown")
-    if not a2: return await message.answer(f"❌ Album 2 '{args[2]}' nahi mila.", parse_mode="Markdown")
-
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/merge <name/id1> <name/id2> <NewName>`\n"
+                                    "Quoted names ke liye: `/merge \'My Pic\' \'Tag Test\' NewAlbum`", parse_mode="Markdown")
+    raw = args[1].strip()
+    # Try quoted first: 'name1' 'name2' newname  or  "name1" "name2" newname
+    quoted = re.findall(r"['\"](.*?)['\"]+", raw)
+    if len(quoted) >= 2:
+        id1 = quoted[0].strip()
+        id2 = quoted[1].strip()
+        # new_name = everything after the 2nd quote
+        second_quote_end = raw.rfind(quoted[1]) + len(quoted[1]) + 1
+        new_name = raw[second_quote_end:].strip().strip("'\"")
+        if not new_name:
+            return await message.answer("❌ New album ka naam dein.", parse_mode="Markdown")
+    else:
+        # No quotes — try to find by scanning: last token = new_name, rest split smartly
+        # Strategy: try each split point, use find_album to detect which works
+        tokens = raw.split()
+        if len(tokens) < 3:
+            return await message.answer("❌ Usage: `/merge <name/id1> <name/id2> <NewName>`", parse_mode="Markdown")
+        # Try: token[0] = id1, rest split for id2+newname
+        found = False
+        for split1 in range(1, len(tokens) - 1):
+            id1_try = " ".join(tokens[:split1])
+            a1_try = await find_album(id1_try)
+            if not a1_try: continue
+            for split2 in range(split1 + 1, len(tokens)):
+                id2_try = " ".join(tokens[split1:split2])
+                a2_try = await find_album(id2_try)
+                if not a2_try: continue
+                new_name = " ".join(tokens[split2:])
+                if new_name:
+                    id1, id2 = id1_try, id2_try
+                    found = True
+                    break
+            if found: break
+        if not found:
+            return await message.answer("❌ Albums nahi mile. Quoted names use karein:\n"
+                                        "`/merge \'My Pic\' \'Tag Test\' NewAlbum`", parse_mode="Markdown")
+    a1 = await find_album(id1)
+    a2 = await find_album(id2)
+    if not a1: return await message.answer(f"❌ Album 1 '{id1}' nahi mila.", parse_mode="Markdown")
+    if not a2: return await message.answer(f"❌ Album 2 '{id2}' nahi mila.", parse_mode="Markdown")
     conflict = await albums_col.find_one({"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}})
     if conflict: return await message.answer(f"⚠️ **'{new_name}'** already exists!", parse_mode="Markdown")
-
     merged_files = a1.get("photos", []) + a2.get("photos", [])
     photos, videos, docs, audios = count_media(merged_files)
     new_id = f"ALB-{now_ist().strftime('%y%m%d%H%M%S')}"
-
     await albums_col.insert_one({
-        "album_id": new_id, "name": new_name,
-        "photos": merged_files, "count": len(merged_files),
-        "locked": False, "tags": [],
-        "created_by": message.from_user.id,
+        "album_id": new_id, "name": new_name, "photos": merged_files, "count": len(merged_files),
+        "locked": False, "tags": auto_generate_tags(new_name), "created_by": message.from_user.id,
         "created_at": now_db(), "updated_at": now_db(),
         "history": [{"action": "merged", "from": [a1["album_id"], a2["album_id"]], "by": message.from_user.id, "at": now_db()}],
         "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios}
     })
-
     await message.answer(
-        f"✅ **Albums Merged!**\n\n"
-        f"📁 **{a1['name']}** ({a1['count']}) + **{a2['name']}** ({a2['count']})\n"
-        f"➡️ **{new_name}** | 🆔 `{new_id}`\n"
-        f"🗂 Total: {len(merged_files)} files",
+        f"✅ **Albums Merged!**\n\n📁 **{a1['name']}** ({a1['count']}) + **{a2['name']}** ({a2['count']})\n➡️ **{new_name}** | 🆔 `{new_id}`\n🗂 Total: {len(merged_files)} files",
         parse_mode="Markdown"
     )
 
@@ -939,63 +887,26 @@ async def cmd_merge(message: types.Message):
 @dp.message(Command("tag"))
 async def cmd_tag(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        return await message.answer("❌ Usage: `/tag ALB-xxx #holi #family`", parse_mode="Markdown")
-
-    album = await find_album(args[1].strip())
-    if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
-
-    new_tags = re.findall(r"#\w+", args[2])
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2: return await message.answer("❌ Usage: `/tag <name/id> #tag1 #tag2`", parse_mode="Markdown")
+    text = args[1].strip()
+    # Album name = sab kuch pehle #tag se pehle
+    tag_match = re.search(r"#\w+", text)
+    if not tag_match: return await message.answer("❌ Koi valid tag nahi mila. Use `#tagname`", parse_mode="Markdown")
+    album_identifier = text[:tag_match.start()].strip()
+    if not album_identifier: return await message.answer("❌ Album name/id dein.", parse_mode="Markdown")
+    album = await find_album(album_identifier)
+    if not album: return await message.answer(f"❌ Album '{album_identifier}' nahi mila.", parse_mode="Markdown")
+    new_tags = re.findall(r"#\w+", text[tag_match.start():])
     if not new_tags: return await message.answer("❌ Koi valid tag nahi mila. Use `#tagname`", parse_mode="Markdown")
-
     existing_tags = album.get("tags", [])
     all_tags = list(set(existing_tags + [t.lower() for t in new_tags]))
     await albums_col.update_one({"_id": album["_id"]}, {"$set": {"tags": all_tags, "updated_at": now_db()}})
-    await message.answer(
-        f"🏷️ **Tags Updated!**\n📁 **{album['name']}**\nTags: {' '.join(all_tags)}",
-        parse_mode="Markdown"
-    )
+    await message.answer(f"🏷️ **Tags Updated!**\n📁 **{album['name']}**\nTags: {' '.join(all_tags)}", parse_mode="Markdown")
 
 
 # ============================================================
-# /search
-# ============================================================
-@dp.message(Command("search"))
-async def cmd_search(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.answer("❌ Usage: `/search query` ya `/search #tag`", parse_mode="Markdown")
 
-    query = args[1].strip()
-
-    if query.startswith("#"):
-        cursor = albums_col.find({"tags": query.lower()}).sort("created_at", -1).limit(10)
-    else:
-        cursor = albums_col.find({
-            "$or": [
-                {"name": {"$regex": re.escape(query), "$options": "i"}},
-                {"album_id": {"$regex": re.escape(query), "$options": "i"}}
-            ]
-        }).sort("created_at", -1).limit(10)
-
-    results = await cursor.to_list(length=10)
-    if not results:
-        return await message.answer(f"🔍 **'{query}'** ke liye koi album nahi mila.", parse_mode="Markdown")
-
-    response = f"🔍 **'{query}'** — {len(results)} mila\n\n"
-    for alb in results:
-        lock = "🔒" if alb.get("locked") else "🔓"
-        date = alb.get("created_at", now_db()).strftime("%d %b %Y")
-        tags = " ".join(alb.get("tags", []))
-        response += (
-            f"{lock} **{alb['name']}**\n"
-            f"🆔 `{alb['album_id']}` | 🗂 {alb['count']} files | 📅 {date}\n"
-        )
-        if tags: response += f"🏷️ {tags}\n"
-        response += f"📦 /zip_{alb['album_id']} | 👁 /view_{alb['album_id']}\n\n"
-
-    await message.answer(response, parse_mode="Markdown")
 
 
 # ============================================================
@@ -1004,57 +915,56 @@ async def cmd_search(message: types.Message):
 @dp.message(Command("albums"))
 async def cmd_list(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-
     try:
         albums = await albums_col.find().sort("created_at", -1).to_list(length=50)
         if not albums:
-            return await message.answer("📂 Cloud empty hai! `/album <naam>` se banayein.", parse_mode="Markdown")
+            return await message.answer("📂 Cloud empty hai! /album se banayein.")
 
-        total_photos = sum(a.get("count", 0) for a in albums)
+        total_files = sum(a.get("count", 0) for a in albums)
         locked_count = sum(1 for a in albums if a.get("locked"))
 
-        header = (
-            f"☁️ **Personal Cloud**\n"
+        # ── Header summary ──────────────────────────────────────
+        await message.answer(
+            f"☁️ Personal Cloud\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📊 {len(albums)} albums | 🗂 {total_photos} files | 🔒 {locked_count} locked\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 {len(albums)} albums  🗂 {total_files} files  🔒 {locked_count} locked\n"
+            f"━━━━━━━━━━━━━━━━━━"
         )
 
-        lines = []
+        # ── One card per album with ZIP + View buttons ───────────
         for alb in albums:
-            icon = "🔒" if alb.get("locked") else "📁"
-            aid = alb.get("album_id") or "N/A"
-            name = alb.get("name") or "Unnamed"
-            count = alb.get("count", 0)
-            date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
-            tags = " ".join(alb.get("tags", []))
-            tag_line = f"\n   🏷️ {tags}" if tags else ""
+            icon  = "🔒" if alb.get("locked") else "📁"
+            aid   = alb.get("album_id") or "N/A"
+            name  = alb.get("name") or "Unnamed"
+            date  = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
+            tags  = "  ".join(alb.get("tags", []))
+            mc    = alb.get("media_count", {})
+            p = mc.get("photos",0); v = mc.get("videos",0)
+            d = mc.get("docs",0);   a = mc.get("audios",0)
+            tp = []
+            if p: tp.append(f"📸 {p}")
+            if v: tp.append(f"🎥 {v}")
+            if d: tp.append(f"📄 {d}")
+            if a: tp.append(f"🎵 {a}")
+            type_str = "  ".join(tp) if tp else f"🗂 {alb.get('count',0)} files"
 
-            lines.append(
-                f"{icon} **{name}**\n"
-                f"   🆔 `{aid}` | 🗂 {count} files\n"
-                f"   📅 {date}{tag_line}\n"
-                f"   📦 /zip_{aid} | 👁 /view_{aid}"
+            lock_status = "🔒 Locked" if alb.get("locked") else "🔓 Unlocked"
+            card = (
+                f"📁 {name}  {lock_status}\n"
+                f"🆔 `{aid}`\n"
+                f"{type_str}\n"
+                f"📅 {date}\n"
             )
+            if tags: card += f"🏷️ {tags}\n"
+            card += f"📦 `/zip {aid}`\n"
+            card += f"👁 `/view {aid}`"
 
-        body = "\n\n".join(lines)
-        full_text = header + body
-
-        if len(full_text) > 4000:
-            await message.answer(header, parse_mode="Markdown")
-            chunk = ""
-            for line in lines:
-                if len(chunk) + len(line) > 3800:
-                    await message.answer(chunk, parse_mode="Markdown")
-                    chunk = ""
-                chunk += line + "\n\n"
-            if chunk: await message.answer(chunk, parse_mode="Markdown")
-        else:
-            await message.answer(full_text, parse_mode="Markdown")
+            await message.answer(card, parse_mode="Markdown")
+            await asyncio.sleep(0.05)
 
     except Exception as e:
         logger.error(f"/albums error: {e}")
-        await message.answer(f"❌ Error: `{e}`", parse_mode="Markdown")
+        await message.answer(f"❌ Error: {e}")
 
 
 # ============================================================
@@ -1064,102 +974,202 @@ async def cmd_list(message: types.Message):
 async def cmd_info(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.answer("❌ Usage: `/info AlbumName` ya `/info ALB-xxx`", parse_mode="Markdown")
-
+    if len(args) < 2: return await message.answer("❌ Usage: /info AlbumName  ya  /info ALB-xxx")
     album = await find_album(args[1].strip())
-    if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
-
+    if not album: return await message.answer("❌ Album nahi mila.")
     mc = album.get("media_count", {})
     photos = mc.get("photos", 0)
     videos = mc.get("videos", 0)
-    docs = mc.get("docs", 0)
+    docs   = mc.get("docs", 0)
     audios = mc.get("audios", 0)
-
-    # If media_count not set, count from files
     if not mc:
         photos, videos, docs, audios = count_media(album.get("photos", []))
-
-    aid = album["album_id"]
-    tags = " ".join(album.get("tags", [])) or "None"
+    aid  = album["album_id"]
+    tags = " ".join(album.get("tags", [])) or None
     lock = "🔒 Locked" if album.get("locked") else "🔓 Unlocked"
-    created = album.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
+
+    # Date in IST
+    raw_created = album.get("created_at", now_db())
+    if raw_created.tzinfo is None:
+        from datetime import timezone
+        raw_created = raw_created.replace(tzinfo=timezone.utc)
+    created = raw_created.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
+
+    # Created by — username preferred, fallback to backtick ID
     by_username = album.get("created_by_username", "")
-    by_str = f"@{by_username}" if by_username else f"ID: {album.get('created_by', 'N/A')}"
+    by_str = f"@{by_username}" if by_username else f"`{album.get('created_by', 'N/A')}`"
+
+    # ── Approximate size from file_sizes stored, else estimate ──
+    files_list = album.get("photos", [])
+    total_size_bytes = sum(f.get("file_size", 0) for f in files_list if isinstance(f, dict))
+    if total_size_bytes > 0:
+        if total_size_bytes >= 1024 * 1024 * 1024:
+            size_str = f"{total_size_bytes / (1024**3):.1f} GB"
+        elif total_size_bytes >= 1024 * 1024:
+            size_str = f"{total_size_bytes / (1024**2):.1f} MB"
+        else:
+            size_str = f"{total_size_bytes / 1024:.0f} KB"
+    else:
+        # Estimate: avg photo ~2MB, video ~50MB, doc ~5MB, audio ~4MB
+        est = (photos * 2 + videos * 50 + docs * 5 + audios * 4)
+        size_str = f"~{est} MB" if est < 1024 else f"~{est/1024:.1f} GB"
 
     text = (
-        f"📋 **Album Info**\n"
+        f"📋 Album Info\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"📁 Name: **{album['name']}**\n"
-        f"🆔 ID: `{aid}`\n"
-        f"👁 View: /view_{aid}\n"
-        f"👤 Created by: {by_str}\n"
-        f"📅 Date: {created}\n"
-        f"🔐 Status: {lock}\n\n"
-        f"🗂 **Files:**\n"
+        f"📁 Name: {album['name']}\n"
+        f"🆔 `{aid}`\n"
+        f"👁 `/view {aid}`\n"
+        f"📦 `/zip {aid}`\n"
+        f"👤 {by_str}\n"
+        f"📅 {created}\n"
+        f"🔐 {lock}\n"
+        f"\n🗂 Files:\n"
     )
-    if photos: text += f"   📸 Photos: {photos}\n"
-    if videos: text += f"   🎥 Videos: {videos}\n"
-    if docs: text += f"   📄 Documents: {docs}\n"
-    if audios: text += f"   🎵 Audio: {audios}\n"
-    text += f"   📊 Total: {album['count']}\n\n"
+    if photos: text += f"📸 Photos: {photos}\n"
+    if videos: text += f"🎥 Videos: {videos}\n"
+    if docs:   text += f"📄 Documents: {docs}\n"
+    if audios: text += f"🎵 Audio: {audios}\n"
+    text += f"📊 Total: {album['count']}\n"
+    text += f"💾 Size: {size_str}\n"
 
-    # History
     history = album.get("history", [])
     if history:
-        text += f"📜 **History:**\n"
+        text += "\n📜 History:\n"
         for h in history[-5:]:
-            action = h.get("action", "")
-            count = h.get("count", 0)
-            at = h.get("at", now_db())
-            if isinstance(at, datetime): date_str = at.strftime("%d %b %Y")
-            else: date_str = str(at)
-            if action == "created": text += f"   ✨ Created | {date_str}\n"
-            elif action == "added": text += f"   ➕ +{count} files | {date_str}\n"
-            elif action == "deleted": text += f"   ➖ {count} files | {date_str}\n"
-            elif action == "merged": text += f"   🔀 Merged | {date_str}\n"
+            action   = h.get("action", "")
+            count    = h.get("count", 0)
+            at       = h.get("at", now_db())
+            date_str = at.strftime("%d %b %Y") if isinstance(at, datetime) else str(at)
+            if action == "created":  text += f"   Created | {date_str}\n"
+            elif action == "added":  text += f"   +{count} files | {date_str}\n"
+            elif action == "deleted":text += f"   -{abs(count)} files | {date_str}\n"
+            elif action == "merged": text += f"   Merged | {date_str}\n"
 
-    text += f"\n🏷️ Tags: {tags}\n"
-    text += f"📦 ZIP: /zip_{aid}"
+    if tags:
+        text += f"\n🏷️ Tags: {tags}"
 
     await message.answer(text, parse_mode="Markdown")
 
 
 # ============================================================
-# /view_
+# /view  — /view AlbumName  ya  /view ALB-xxx  ya  /view_ALB-xxx (shortcut)
 # ============================================================
 @dp.message(F.text.regexp(r"^/view_[A-Za-z0-9\-]+$"))
+async def view_shortcut(message: types.Message):
+    aid = message.text.replace("/view_", "").strip()
+    message.text = f"/view {aid}"
+    await view_by_id(message)
+
+@dp.message(Command("view"))
 async def view_by_id(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    aid = message.text.replace("/view_", "").strip()
-    album = await find_album(aid)
-    if not album: return await message.answer(f"❌ Album `{aid}` nahi mila.", parse_mode="Markdown")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage:\n/view AlbumName\n/view ALB-xxx\n/view #tag1 #tag2")
 
+    identifier = args[1].strip()
+
+    # ── TAG SEARCH MODE ─────────────────────────────────────
+    # If any word starts with #, treat as tag search
+    tags_input = [w.lower() for w in identifier.split() if w.startswith("#")]
+    if tags_input:
+        # Match albums that have ALL the given tags (AND logic)
+        # But also partial match: #holi matches #holi, #holi2026, #holi #insta etc.
+        query_conditions = []
+        for tag in tags_input:
+            # regex match — #holi matches #holi, #holi2026, #holi2026jan etc.
+            query_conditions.append({"tags": {"$elemMatch": {"$regex": f"^{re.escape(tag)}", "$options": "i"}}})
+
+        cursor = albums_col.find({"$and": query_conditions} if len(query_conditions) > 1 else query_conditions[0]).sort("created_at", -1)
+        results = await cursor.to_list(length=50)
+
+        if not results:
+            return await message.answer(f"❌ '{identifier}' se koi album nahi mila.")
+
+        await message.answer(f"🏷️ {identifier} — {len(results)} album(s) mila")
+
+        for alb in results:
+            icon  = "🔒" if alb.get("locked") else "🔓"
+            aid   = alb["album_id"]
+            name  = alb.get("name", "Unnamed")
+            date  = alb.get("created_at", now_db())
+            if date.tzinfo is None:
+                from datetime import timezone
+                date = date.replace(tzinfo=timezone.utc)
+            date_str = date.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
+            album_tags = "  ".join(alb.get("tags", []))
+            mc  = alb.get("media_count", {})
+            p = mc.get("photos",0); v = mc.get("videos",0)
+            d = mc.get("docs",0);   a = mc.get("audios",0)
+            tp = []
+            if p: tp.append(f"📸 {p}")
+            if v: tp.append(f"🎥 {v}")
+            if d: tp.append(f"📄 {d}")
+            if a: tp.append(f"🎵 {a}")
+            type_str = "  ".join(tp) if tp else f"🗂 {alb.get('count',0)}"
+            lock_status = "🔒 Locked" if alb.get("locked") else "🔓 Unlocked"
+
+            card = (
+                f"📁 {name}  {lock_status}\n"
+                f"`{aid}`\n"
+                f"{type_str}\n"
+                f"📅 {date_str}\n"
+            )
+            if album_tags: card += f"{album_tags}\n"
+            card += f"`/zip {aid}`\n"
+            card += f"`/view {aid}`"
+
+            await message.answer(card, parse_mode="Markdown")
+            await asyncio.sleep(0.05)
+        return
+
+    # ── NORMAL MODE — name or ID se seedha files ─────────────
+    album = await find_album(identifier)
+    if not album:
+        return await message.answer(f"❌ Album '{identifier}' nahi mila.")
+    mc = album.get("media_count", {})
+    p = mc.get("photos",0); v = mc.get("videos",0)
+    d = mc.get("docs",0);   a = mc.get("audios",0)
+    tp = []
+    if p: tp.append(f"📸{p}")
+    if v: tp.append(f"🎥{v}")
+    if d: tp.append(f"📄{d}")
+    if a: tp.append(f"🎵{a}")
+    type_str = "  ".join(tp) if tp else f"{album['count']} files"
     await message.answer(
-        f"📂 **{album['name']}**\n🆔 `{album['album_id']}` | 🗂 {album['count']} files\n_Loading..._",
-        parse_mode="Markdown"
+        f"📂 {album['name']}\n🆔 {album['album_id']}\n🗂 {type_str}\nLoading..."
     )
-
     files = album.get("photos", [])
     sent = failed = 0
     for item in files:
         fid = item["file_id"] if isinstance(item, dict) else item
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+        channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
         try:
-            if mtype == "video": await bot.send_video(message.chat.id, fid)
+            if channel_msg_id:
+                await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
+            elif mtype == "video":    await bot.send_video(message.chat.id, fid)
             elif mtype == "document": await bot.send_document(message.chat.id, fid)
-            elif mtype == "audio": await bot.send_audio(message.chat.id, fid)
-            else: await bot.send_photo(message.chat.id, fid)
+            elif mtype == "audio":    await bot.send_audio(message.chat.id, fid)
+            else:                     await bot.send_photo(message.chat.id, fid)
             sent += 1
         except: failed += 1
         await asyncio.sleep(0.3)
+    summary = f"✅ {sent}/{len(files)} files sent!"
+    if failed: summary += f"\n⚠️ {failed} failed."
+    await message.answer(summary)
 
-    summary = f"✅ **{sent}/{len(files)} files** sent!"
-    if failed: summary += f"\n⚠️ {failed} failed (expired IDs)."
-    await message.answer(summary, parse_mode="Markdown")
+
 
 
 # ============================================================
-# /zip_ shortcut & /zip command
+# /zip  —  Smart Export
+#
+#  • size < 20 MB  → download → ZIP (500 MB pe split)
+#                    AlbumName.zip  /  AlbumName_part1.zip …
+#  • size ≥ 20 MB  → Storage Channel se seedha forward
+#  • Koi auto-delete NAHI — ZIP permanently bot chat mein save
 # ============================================================
 @dp.message(F.text.regexp(r"^/zip_[A-Za-z0-9\-]+$"))
 async def zip_shortcut(message: types.Message):
@@ -1169,122 +1179,216 @@ async def zip_shortcut(message: types.Message):
 
 @dp.message(Command("zip"))
 async def cmd_zip(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
     args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.answer("❌ Usage: `/zip AlbumName` ya `/zip ALB-xxx`", parse_mode="Markdown")
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/zip AlbumName` ya `/zip ALB-xxx`", parse_mode="Markdown")
 
     album = await find_album(args[1].strip())
-    if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+    if not album:
+        return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
 
     files = album.get("photos", [])
-    if not files: return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
+    if not files:
+        return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
+
+    DOWNLOAD_LIMIT = 20 * 1024 * 1024   # 20 MB — Telegram get_file limit
+    SPLIT_SIZE     = 45 * 1024 * 1024   # 45 MB — Telegram upload limit is 50 MB
+    EXT_MAP = {"photo": "jpg", "video": "mp4", "document": "bin", "audio": "mp3", "voice": "ogg"}
 
     status_msg = await message.answer(
-        f"⏳ ZIP ban raha hai...\n📁 **{album['name']}** | 🗂 {len(files)} files",
+        f"🔍 Files check kar raha hoon...\n"
+        f"📁 **{album['name']}** | 🗂 {len(files)} files",
         parse_mode="Markdown"
     )
 
-    zippable = []
-    videos = []
-    for item in files:
-        fid = item["file_id"] if isinstance(item, dict) else item
-        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-        fname = item.get("name", "") if isinstance(item, dict) else ""
-        if mtype == "video": videos.append(fid)
-        else: zippable.append((fid, mtype, fname))
+    # ── Step 1: Categorise by size ──────────────────────────────
+    small_files = []   # (fid, mtype, fname, tg_file)   → will be zipped
+    large_files = []   # (fid, mtype, fname, channel_msg_id)  → forward directly
+    check_failed = 0
 
-    zip_buffer = io.BytesIO()
-    zipped = failed = 0
+    for idx, item in enumerate(files, 1):
+        fid            = item["file_id"]            if isinstance(item, dict) else item
+        mtype          = item.get("type",  "photo") if isinstance(item, dict) else "photo"
+        fname          = item.get("name",  "")      if isinstance(item, dict) else ""
+        channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
+
+        try:
+            tg_file = await bot.get_file(fid)
+            fsize   = tg_file.file_size or 0
+            if fsize < DOWNLOAD_LIMIT:
+                small_files.append((fid, mtype, fname, tg_file))
+            else:
+                large_files.append((fid, mtype, fname, channel_msg_id))
+        except Exception:
+            # get_file fails for files > 20 MB — treat as large
+            if channel_msg_id:
+                large_files.append((fid, mtype, fname, channel_msg_id))
+            else:
+                check_failed += 1
+
+        if idx % 20 == 0:
+            try:
+                await status_msg.edit_text(
+                    f"🔍 Checking... {idx}/{len(files)}\n📁 **{album['name']}**",
+                    parse_mode="Markdown"
+                )
+            except: pass
 
     try:
-        with zipfile.ZipFile(zip_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-            for idx, (fid, mtype, fname) in enumerate(zippable, 1):
-                try:
-                    tg_file = await bot.get_file(fid)
-                    file_url = f"https://api.telegram.org/file/bot{API_TOKEN}/{tg_file.file_path}"
-                    async with aiohttp.ClientSession() as sess:
-                        async with sess.get(file_url) as resp:
-                            if resp.status == 200:
-                                data = await resp.read()
-                                ext = tg_file.file_path.split(".")[-1] if "." in tg_file.file_path else mtype
-                                filename = fname if fname else f"{idx:03d}_{mtype}.{ext}"
-                                zf.writestr(filename, data)
-                                zipped += 1
-                            else: failed += 1
-                except Exception as e:
-                    logger.error(f"ZIP error: {e}")
-                    failed += 1
+        await status_msg.edit_text(
+            f"📊 **{album['name']}**\n"
+            f"📦 ZIP (<20 MB): {len(small_files)} files\n"
+            f"📤 Direct forward (≥20 MB): {len(large_files)} files\n"
+            f"{'⚠️ Unreachable: ' + str(check_failed) + ' files' + chr(10) if check_failed else ''}"
+            f"⏳ Processing...",
+            parse_mode="Markdown"
+        )
+    except: pass
 
-        zip_buffer.seek(0)
+    zip_parts_sent = 0
+    total_zipped   = 0
+    forwarded      = 0
+    fwd_failed     = 0
 
-        if zipped > 0:
-            zip_name = album['name']
-            zip_msg = await bot.send_document(
-                message.chat.id,
-                document=types.BufferedInputFile(zip_buffer.read(), filename=f"{zip_name}.zip"),
-                caption=f"📦 **{zip_name}.zip**\n🗂 {zipped} files\n⚠️ _Auto-delete: 5 min_",
+    # ── Step 2: Download small files ───────────────────────────
+    if small_files:
+        try:
+            await status_msg.edit_text(
+                f"⏬ Downloading {len(small_files)} files...\n📁 **{album['name']}**",
                 parse_mode="Markdown"
             )
+        except: pass
 
-            btn = InlineKeyboardBuilder()
-            btn.row(
-                types.InlineKeyboardButton(text="🗑️ Delete ZIP", callback_data=f"delzip_{zip_msg.message_id}_{message.chat.id}"),
-                types.InlineKeyboardButton(text="📤 Share", switch_inline_query=f"")
-            )
-            await bot.edit_message_reply_markup(
-                chat_id=message.chat.id, message_id=zip_msg.message_id,
-                reply_markup=btn.as_markup()
-            )
+        downloaded = []   # (safe_name, bytes_data)
 
-            async def auto_delete(mid=zip_msg.message_id, cid=message.chat.id, name=zip_name):
-                await asyncio.sleep(300)
+        for idx, (fid, mtype, fname, tg_file) in enumerate(small_files, 1):
+            try:
+                url = f"https://api.telegram.org/file/bot{API_TOKEN}/{tg_file.file_path}"
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.read()
+                            ext = (tg_file.file_path.rsplit(".", 1)[-1]
+                                   if "." in tg_file.file_path
+                                   else EXT_MAP.get(mtype, "bin"))
+                            safe_name = fname if fname else f"{idx:04d}_{mtype}.{ext}"
+                            downloaded.append((safe_name, data))
+            except Exception as e:
+                logger.error(f"Download error idx {idx}: {e}")
+
+            if idx % 10 == 0:
                 try:
-                    await bot.delete_message(cid, mid)
-                    await bot.send_message(cid, f"🗑️ ZIP auto-deleted: **{name}.zip**", parse_mode="Markdown")
+                    await status_msg.edit_text(
+                        f"⏬ Downloading... {idx}/{len(small_files)}\n📁 **{album['name']}**",
+                        parse_mode="Markdown"
+                    )
                 except: pass
-            asyncio.create_task(auto_delete())
 
-        if videos:
-            await message.answer(f"🎥 **{len(videos)} video(s)** alag se aa rahi hain...", parse_mode="Markdown")
-            for fid in videos:
+        # ── Step 3: Pack into 500 MB split ZIPs ────────────────
+        if downloaded:
+            try:
+                await status_msg.edit_text(
+                    f"🗜 Packing ZIP ({len(downloaded)} files)...\n📁 **{album['name']}**",
+                    parse_mode="Markdown"
+                )
+            except: pass
+
+            zip_name = re.sub(r'[^\w\s\-]', '', album["name"]).strip().replace(' ', '_') or "album"
+            parts     = []             # list of (BytesIO, file_count)
+            cur_buf   = io.BytesIO()
+            cur_zf    = zipfile.ZipFile(cur_buf, mode='w', compression=zipfile.ZIP_DEFLATED)
+            cur_size  = 0
+            cur_count = 0
+
+            for safe_name, data in downloaded:
+                # Start a new part if adding this file would exceed 500 MB
+                if cur_size + len(data) > SPLIT_SIZE and cur_count > 0:
+                    cur_zf.close()
+                    cur_buf.seek(0)
+                    parts.append((cur_buf, cur_count))
+                    cur_buf   = io.BytesIO()
+                    cur_zf    = zipfile.ZipFile(cur_buf, mode='w', compression=zipfile.ZIP_DEFLATED)
+                    cur_size  = 0
+                    cur_count = 0
+
+                cur_zf.writestr(safe_name, data)
+                cur_size  += len(data)
+                cur_count += 1
+
+            if cur_count > 0:
+                cur_zf.close()
+                cur_buf.seek(0)
+                parts.append((cur_buf, cur_count))
+
+            total_parts = len(parts)
+
+            # ── Step 4: Send each ZIP part (NO timer, permanently saved) ──
+            for part_num, (zip_buf, file_count) in enumerate(parts, 1):
+                part_fname = (
+                    f"{zip_name}_part{part_num}.zip" if total_parts > 1
+                    else f"{zip_name}.zip"
+                )
+                part_label = f" (Part {part_num}/{total_parts})" if total_parts > 1 else ""
+
                 try:
+                    await bot.send_document(
+                        message.chat.id,
+                        document=types.BufferedInputFile(zip_buf.read(), filename=part_fname),
+                        caption=f"📦 {part_fname}{part_label}\n🗂 {file_count} files | Saved"
+                        # No parse_mode — album name mein special chars ho sakte hain
+                    )
+                    zip_parts_sent += 1
+                    total_zipped   += file_count
+                except Exception as e:
+                    logger.error(f"ZIP send error part {part_num}: {e}")
+                    await message.answer(f"ZIP Part {part_num} send nahi hua: {e}")
+
+    # ── Step 5: Forward large files directly ───────────────────
+    if large_files:
+        await message.answer(
+            f"📤 **{len(large_files)} badi file(s)** direct bhej raha hoon (≥20 MB)...",
+            parse_mode="Markdown"
+        )
+        for fid, mtype, fname, channel_msg_id in large_files:
+            try:
+                if channel_msg_id:
+                    await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
+                elif mtype == "video":
                     await bot.send_video(message.chat.id, fid)
-                    await asyncio.sleep(0.3)
-                except: pass
+                elif mtype == "document":
+                    await bot.send_document(message.chat.id, fid)
+                elif mtype == "audio":
+                    await bot.send_audio(message.chat.id, fid)
+                elif mtype == "voice":
+                    await bot.send_voice(message.chat.id, fid)
+                else:
+                    await bot.send_photo(message.chat.id, fid)
+                forwarded += 1
+            except Exception as e:
+                logger.error(f"Large file forward error: {e}")
+                fwd_failed += 1
+            await asyncio.sleep(0.4)
 
-        summary = f"✅ ZIP ready!\n📦 {zipped} files zipped"
-        if failed: summary += f"\n⚠️ {failed} failed"
-        if videos: summary += f"\n🎥 {len(videos)} videos alag bheji"
-        await status_msg.edit_text(summary, parse_mode="Markdown")
+    # ── Step 6: Final summary ───────────────────────────────────
+    final = f"✅ **Done! — {album['name']}**\n\n"
+    if zip_parts_sent:
+        final += f"📦 ZIP: {zip_parts_sent} part(s) | {total_zipped} files packed\n"
+    if forwarded:
+        final += f"📤 Direct forwarded: {forwarded} large file(s)\n"
+    if fwd_failed:
+        final += f"⚠️ Forward failed: {fwd_failed}\n"
+    if check_failed:
+        final += f"❌ Unreachable: {check_failed} files\n"
+    if zip_parts_sent == 0 and forwarded == 0:
+        final = "❌ Koi bhi file process nahi ho saki."
 
-    except Exception as e:
-        logger.error(f"ZIP error: {e}")
-        await status_msg.edit_text(f"❌ ZIP error: `{e}`", parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("delzip_"))
-async def delete_zip_cb(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("🚫", show_alert=True)
-    try:
-        parts = callback.data.split("_")
-        await bot.delete_message(int(parts[2]), int(parts[1]))
-        await callback.answer("🗑️ ZIP deleted!")
-    except: await callback.answer("❌ Delete failed.", show_alert=True)
+    await status_msg.edit_text(final, parse_mode="Markdown")
 
 
-# ============================================================
-# /recent
-# ============================================================
-@dp.message(Command("recent"))
-async def cmd_recent(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    albums = await albums_col.find().sort("updated_at", -1).limit(5).to_list(5)
-    if not albums: return await message.answer("📂 Koi album nahi.", parse_mode="Markdown")
 
-    text = "🕐 **Recently Updated Albums:**\n\n"
-    for alb in albums:
-        date = alb.get("updated_at", now_db()).strftime("%d %b %Y, %I:%M %p")
-        text += f"📁 **{alb['name']}** | 🗂 {alb['count']} files\n📅 {date}\n👁 /view_{alb['album_id']}\n\n"
-    await message.answer(text, parse_mode="Markdown")
 
 
 # ============================================================
@@ -1301,15 +1405,13 @@ async def cmd_stats(message: types.Message):
         total_files = res[0]["total"] if res else 0
         latest = await albums_col.find_one(sort=[("created_at", -1)])
         largest = await albums_col.find_one(sort=[("count", -1)])
-
         await message.answer(
             f"📊 **Cloud Stats**\n━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📁 Albums: {total}\n🗂 Total Files: {total_files}\n"
             f"🔒 Locked: {locked} | 🔓 Unlocked: {total-locked}\n\n"
             f"📅 Latest: **{latest['name'] if latest else '-'}**\n"
             f"🏆 Largest: **{largest['name']} ({largest['count']} files)**\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🟢 Bot: Online\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
+            f"━━━━━━━━━━━━━━━━━━━━━\n🟢 Bot: Online\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -1324,24 +1426,27 @@ async def cmd_b2(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer(
-            "❌ Usage:\n`/b2 ALB-xxx @user`\n`/b2 ALB-xxx @u1 @u2 @u3`\n`/b2 AlbumName 123456789`",
-            parse_mode="Markdown"
-        )
-
-    parts = args[1].split()
-    if len(parts) < 2: return await message.answer("❌ Album ID aur recipient dein.", parse_mode="Markdown")
-
-    album_id = parts[0]
-    targets_raw = parts[1:]
-
-    album = await find_album(album_id)
-    if not album: return await message.answer(f"❌ Album '{album_id}' nahi mila.", parse_mode="Markdown")
-
+        return await message.answer("❌ Usage: `/b2 <id\/name> @u1 @u2` ya `/b2 <id\/name> userid`", parse_mode="Markdown")
+    text = args[1].strip()
+    tokens = text.split()
+    if len(tokens) < 2: return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
+    # Recipients = trailing @username or numeric tokens
+    targets_raw = []
+    name_tokens = []
+    for t in reversed(tokens):
+        if t.startswith("@") or t.lstrip("-").isdigit():
+            targets_raw.insert(0, t)
+        else:
+            # Once we hit a non-recipient token, rest is album name
+            name_tokens = tokens[:tokens.index(t) + 1]
+            break
+    if not targets_raw: return await message.answer("❌ Recipient (@user ya userid) dein.", parse_mode="Markdown")
+    if not name_tokens: return await message.answer("❌ Album name/id dein.", parse_mode="Markdown")
+    album_identifier = " ".join(name_tokens)
+    album = await find_album(album_identifier)
+    if not album: return await message.answer(f"❌ Album '{album_identifier}' nahi mila.", parse_mode="Markdown")
     files = album.get("photos", [])
     if not files: return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
-
-    # Resolve all targets
     target_ids = []
     for t in targets_raw:
         if t.lstrip("-").isdigit():
@@ -1351,19 +1456,11 @@ async def cmd_b2(message: types.Message):
             doc = await db.granted_users.find_one({"username": uname})
             if doc and doc.get("user_id"): target_ids.append((doc["user_id"], t))
             else: await message.answer(f"⚠️ {t} ka ID nahi mila, skip.", parse_mode="Markdown")
-
     if not target_ids: return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
-
-    await message.answer(
-        f"📤 Sending **{album['name']}** to {len(target_ids)} user(s)...",
-        parse_mode="Markdown"
-    )
-
+    await message.answer(f"📤 Sending **{album['name']}** to {len(target_ids)} user(s)...", parse_mode="Markdown")
     for uid, uname in target_ids:
         try:
-            await bot.send_message(uid,
-                f"📂 **{album['name']}**\n🗂 {len(files)} files\n_Loading..._",
-                parse_mode="Markdown")
+            await bot.send_message(uid, f"📂 **{album['name']}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             sent = 0
             for item in files:
                 fid = item["file_id"] if isinstance(item, dict) else item
@@ -1376,21 +1473,13 @@ async def cmd_b2(message: types.Message):
                     sent += 1
                 except: pass
                 await asyncio.sleep(0.3)
-
             await bot.send_message(uid, f"✅ **{sent} files** received!", parse_mode="Markdown")
-
-            # Log to history
             await b2_history_col.insert_one({
-                "album_id": album["album_id"],
-                "album_name": album["name"],
-                "sent_by": message.from_user.id,
-                "sent_to": uid,
-                "sent_to_name": uname,
-                "files_count": sent,
-                "sent_at": now_db()
+                "album_id": album["album_id"], "album_name": album["name"],
+                "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname,
+                "files_count": sent, "sent_at": now_db()
             })
             await message.answer(f"✅ **{uname}** ko {sent} files bhej di!", parse_mode="Markdown")
-
         except Exception as e:
             await message.answer(f"❌ **{uname}** ko bhejne mein error: {e}", parse_mode="Markdown")
 
@@ -1400,19 +1489,67 @@ async def cmd_b2(message: types.Message):
 # ============================================================
 @dp.message(Command("b2list"))
 async def cmd_b2list(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
-    history = await b2_history_col.find().sort("sent_at", -1).limit(20).to_list(20)
-    if not history: return await message.answer("📋 Koi share history nahi.", parse_mode="Markdown")
-
-    text = "📤 **Share History (Last 20):**\n\n"
+    if not is_owner(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    total = await b2_history_col.count_documents({})
+    history = await b2_history_col.find().sort("sent_at", -1).limit(50).to_list(50)
+    if not history: return await message.answer("📋 Koi share history nahi.")
+    text = f"📤 Share History all ({total}):\n\n"
     for h in history:
-        date = h.get("sent_at", now_db()).strftime("%d %b %Y, %I:%M %p")
+        # Date in IST
+        raw_date = h.get("sent_at", now_db())
+        if raw_date.tzinfo is None:
+            from datetime import timezone
+            raw_date = raw_date.replace(tzinfo=timezone.utc)
+        date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
+        # Recipient — username preferred, fallback to ID
+        sent_to_name = h.get("sent_to_name", "")
+        sent_to_id   = h.get("sent_to", "")
+        if sent_to_name and sent_to_name.startswith("@"):
+            recipient = sent_to_name
+        elif sent_to_id:
+            # Try to get username from granted_users
+            doc = await db.granted_users.find_one({"user_id": int(sent_to_id)}) if str(sent_to_id).isdigit() else None
+            uname = doc.get("username") if doc else None
+            recipient = f"@{uname}" if uname else str(sent_to_id)
+        else:
+            recipient = "—"
         text += (
-            f"📁 **{h.get('album_name', 'N/A')}**\n"
-            f"➡️ To: {h.get('sent_to_name', h.get('sent_to'))}\n"
-            f"🗂 {h.get('files_count', 0)} files | 📅 {date}\n\n"
+            f"📁 {h.get('album_name', 'N/A')}\n"
+            f"➡️ To: {recipient}\n"
+            f"🗂 {h.get('files_count', 0)} files\n"
+            f"📅 {date}\n\n"
         )
-    await message.answer(text, parse_mode="Markdown")
+    # Split if too long
+    if len(text) > 4000:
+        chunks = []
+        chunk = f"📤 Share History all ({total}):\n\n"
+        for h in history:
+            raw_date = h.get("sent_at", now_db())
+            if raw_date.tzinfo is None:
+                from datetime import timezone
+                raw_date = raw_date.replace(tzinfo=timezone.utc)
+            date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
+            sent_to_name = h.get("sent_to_name", "")
+            sent_to_id   = h.get("sent_to", "")
+            if sent_to_name and sent_to_name.startswith("@"):
+                recipient = sent_to_name
+            else:
+                recipient = str(sent_to_id) if sent_to_id else "—"
+            entry = (
+                f"📁 {h.get('album_name', 'N/A')}\n"
+                f"➡️ To: {recipient}\n"
+                f"🗂 {h.get('files_count', 0)} files\n"
+                f"📅 {date}\n\n"
+            )
+            if len(chunk) + len(entry) > 3800:
+                chunks.append(chunk)
+                chunk = ""
+            chunk += entry
+        if chunk.strip(): chunks.append(chunk)
+        for c in chunks:
+            await message.answer(c)
+    else:
+        await message.answer(text)
 
 
 # ============================================================
@@ -1425,8 +1562,7 @@ async def cmd_cancel(message: types.Message):
         session = user_sessions[uid]
         del user_sessions[uid]
         await message.answer(
-            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n"
-            f"_{len(session.get('photos', []))} unsaved files discard ho gayi._",
+            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n_{len(session.get('photos', []))} unsaved files discard ho gayi._",
             parse_mode="Markdown"
         )
     else:
@@ -1444,11 +1580,8 @@ async def send_greeting(user_id: int, fallback_name: str = "Friend"):
         except: name = fallback_name
         now = now_db()
         await bot.send_message(user_id,
-            f"👋 **HEY {name}!**\n\n"
-            f"🎉 **Grant Access Successfully!**\n\n"
-            f"🥳 **ENJOY!!**\n\n"
-            f"📅 **Access Date:** {now.strftime('%d %B %Y')}\n"
-            f"🕐 **Access Time:** {now.strftime('%I:%M %p')} IST",
+            f"👋 **HEY {name}!**\n\n🎉 **Grant Access Successfully!**\n\n🥳 **ENJOY!!**\n\n"
+            f"📅 **Access Date:** {now.strftime('%d %B %Y')}\n🕐 **Access Time:** {now.strftime('%I:%M %p')} IST",
             parse_mode="Markdown"
         )
         return True
@@ -1459,58 +1592,47 @@ async def send_greeting(user_id: int, fallback_name: str = "Friend"):
 @dp.message(Command("grant"))
 async def cmd_grant(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
-
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer(
-            "❌ Usage:\n`/grant 123456789`\n`/grant @username`",
-            parse_mode="Markdown"
-        )
-
+        return await message.answer("❌ Usage:\n`/grant 123456789`\n`/grant @username`", parse_mode="Markdown")
     target = args[1].strip()
-
     if target.lstrip("-").isdigit():
         uid = int(target)
         if uid == ADMIN_ID: return await message.answer("⚠️ Aap owner hain already!")
         granted_users.add(uid)
+        fetched_username = None
+        try:
+            chat = await bot.get_chat(uid)
+            fetched_username = chat.username.lower() if chat.username else None
+        except: pass
         await db.granted_users.update_one(
             {"user_id": uid},
-            {"$set": {"user_id": uid, "username": None, "granted_at": now_db(), "granted_by": message.from_user.id}},
+            {"$set": {"user_id": uid, "username": fetched_username, "granted_at": now_db(), "granted_by": message.from_user.id}},
             upsert=True
         )
-        await message.answer(f"✅ **Access Granted!**\n🆔 `{uid}`", parse_mode="Markdown")
+        uname_str = f"@{fetched_username}" if fetched_username else f"ID: {uid}"
+        await message.answer(f"✅ Access Granted!\n👤 {uname_str}\n🆔 {uid}")
         ok = await send_greeting(uid)
-        if not ok:
-            await message.answer("⚠️ User ko greeting nahi gayi — user ne pehle /start kiya ho.", parse_mode="Markdown")
-
+        if not ok: await message.answer("⚠️ User ko greeting nahi gayi — user ne pehle /start kiya ho.")
     elif target.startswith("@"):
         username = target.lstrip("@").lower()
         doc = await db.granted_users.find_one({"username": username})
         if doc and doc.get("user_id"):
             uid = doc["user_id"]
             granted_users.add(uid)
-            await db.granted_users.update_one(
-                {"user_id": uid},
-                {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}},
-                upsert=True
-            )
+            await db.granted_users.update_one({"user_id": uid}, {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}}, upsert=True)
             await message.answer(f"✅ **Access Granted!**\n👤 @{username} | 🆔 `{uid}`", parse_mode="Markdown")
             ok = await send_greeting(uid, username)
-            if not ok:
-                await message.answer("⚠️ User ko greeting nahi gayi.", parse_mode="Markdown")
+            if not ok: await message.answer("⚠️ User ko greeting nahi gayi.", parse_mode="Markdown")
         else:
             await db.granted_users.update_one(
                 {"username": username},
                 {"$set": {"username": username, "user_id": None, "granted_at": now_db(), "granted_by": message.from_user.id, "pending": True}},
                 upsert=True
             )
-            await message.answer(
-                f"⏳ **Pending Grant!**\n👤 @{username}\nJab pehli baar /start karenge, activate ho jayega.\n💡 User ID zyada reliable hai.",
-                parse_mode="Markdown"
-            )
+            await message.answer(f"⏳ **Pending Grant!**\n👤 @{username}\nJab pehli baar /start karenge, activate ho jayega.\n💡 User ID zyada reliable hai.", parse_mode="Markdown")
     else:
         await message.answer("❌ Valid User ID ya @username dein.", parse_mode="Markdown")
-
 
 @dp.message(Command("denied"))
 async def cmd_denied(message: types.Message):
@@ -1518,7 +1640,6 @@ async def cmd_denied(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2: return await message.answer("❌ Usage: `/denied 123` ya `/denied @user`", parse_mode="Markdown")
     target = args[1].strip()
-
     if target.lstrip("-").isdigit():
         uid = int(target)
         if uid == ADMIN_ID: return await message.answer("⚠️ Owner ka access nahi hata sakte!")
@@ -1536,53 +1657,51 @@ async def cmd_denied(message: types.Message):
         else: await message.answer(f"⚠️ @{username} list mein nahi tha.", parse_mode="Markdown")
     else: await message.answer("❌ Valid ID ya @username dein.", parse_mode="Markdown")
 
-
 @dp.message(Command("grantlist"))
 async def cmd_grantlist(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
     users = await db.granted_users.find().to_list(100)
     if not users: return await message.answer("📋 Koi granted user nahi.", parse_mode="Markdown")
-
-    text = "👥 **Granted Users:**\n━━━━━━━━━━━━━━━━━━\n\n"
+    text = "👥 Granted Users:\n━━━━━━━━━━━━━━━━━━\n\n"
     for u in users:
-        uid = u.get("user_id")
+        uid   = u.get("user_id")
         uname = u.get("username")
         pending = u.get("pending", False)
-        date = u.get("granted_at", now_db()).strftime("%d %b %Y")
+        raw_date = u.get("granted_at", now_db())
+        if raw_date.tzinfo is None:
+            from datetime import timezone
+            raw_date = raw_date.replace(tzinfo=timezone.utc)
+        date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
         status = "⏳ Pending" if pending else "✅ Active"
-        id_str = f"`{uid}`" if uid else "-"
-        name_str = f"@{uname}" if uname else "-"
-        text += f"{status} | {name_str} | {id_str}\n📅 {date}\n\n"
-
+        uname_line = f"@{uname}" if uname else "Username: nahi mila"
+        uid_line   = f"`{uid}`" if uid else "—"
+        text += f"{status}\n👤 {uname_line}\n🆔 {uid_line}\n📅 {date}\n\n"
     text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(users)}"
     await message.answer(text, parse_mode="Markdown")
-
 
 @dp.message(Command("grantlistinfo"))
 async def cmd_grantlistinfo(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
     args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.answer("❌ Usage: `/grantlistinfo userid`", parse_mode="Markdown")
-
-    try: target_uid = int(args[1].strip())
-    except: return await message.answer("❌ Valid User ID dein.", parse_mode="Markdown")
-
+    if len(args) < 2: return await message.answer("❌ Usage: `/grantlistinfo <userid>` ya `/grantlistinfo @username`", parse_mode="Markdown")
+    target_arg = args[1].strip()
+    if target_arg.startswith("@"):
+        uname_lookup = target_arg.lstrip("@").lower()
+        doc = await db.granted_users.find_one({"username": uname_lookup})
+        if not doc or not doc.get("user_id"): return await message.answer(f"❌ @{uname_lookup} nahi mila.")
+        target_uid = doc["user_id"]
+    else:
+        try: target_uid = int(target_arg)
+        except: return await message.answer("❌ Valid User ID ya @username dein.")
     albums = await albums_col.find({"created_by": target_uid}).sort("created_at", -1).to_list(50)
     user_doc = await db.granted_users.find_one({"user_id": target_uid})
     uname = f"@{user_doc['username']}" if user_doc and user_doc.get("username") else f"ID: {target_uid}"
-
     if not albums:
         return await message.answer(f"📋 **{uname}** ne koi album create nahi kiya.", parse_mode="Markdown")
-
     text = f"👤 **{uname}** ki Albums:\n━━━━━━━━━━━━━━━━━━\n\n"
     for alb in albums:
         date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
-        text += (
-            f"📁 **{alb['name']}**\n"
-            f"🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n"
-            f"📅 {date}\n"
-            f"👁 /view_{alb['album_id']}\n\n"
-        )
+        text += f"📁 **{alb['name']}**\n🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n📅 {date}\n👁 /view_{alb['album_id']}\n\n"
     text += f"Total: {len(albums)} albums"
     await message.answer(text, parse_mode="Markdown")
 
@@ -1594,13 +1713,7 @@ async def cmd_grantlistinfo(message: types.Message):
 async def cmd_id(message: types.Message):
     user = message.from_user
     uname = f"@{user.username}" if user.username else "N/A"
-    await message.answer(
-        f"👤 **Your Info:**\n"
-        f"🆔 User ID: `{user.id}`\n"
-        f"📛 Name: {user.full_name}\n"
-        f"🔗 Username: {uname}",
-        parse_mode="Markdown"
-    )
+    await message.answer(f"👤 **Your Info:**\n🆔 User ID: `{user.id}`\n📛 Name: {user.full_name}\n🔗 Username: {uname}", parse_mode="Markdown")
 
 
 # ============================================================
@@ -1610,6 +1723,30 @@ async def cmd_id(message: types.Message):
 async def unknown_command(message: types.Message):
     if not is_admin(message.from_user.id): return
     await message.answer("YOU ARE NOT MY SENPAI 😤")
+
+
+# ============================================================
+# INLINE BUTTON CALLBACKS — do_zip_ / do_view_
+# Tap karte seedha ZIP ya View trigger hota hai
+# ============================================================
+@dp.callback_query(F.data.startswith("do_zip_"))
+async def cb_do_zip(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Access Denied!", show_alert=True)
+    aid = callback.data.replace("do_zip_", "")
+    await callback.answer("📦 ZIP shuru ho raha hai...")
+    # Reuse cmd_zip by simulating message
+    callback.message.text = f"/zip {aid}"
+    await cmd_zip(callback.message)
+
+@dp.callback_query(F.data.startswith("do_view_"))
+async def cb_do_view(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Access Denied!", show_alert=True)
+    aid = callback.data.replace("do_view_", "")
+    await callback.answer("👁 Loading...")
+    callback.message.text = f"/view_{aid}"
+    await view_by_id(callback.message)
 
 
 # ============================================================
@@ -1628,7 +1765,6 @@ async def main():
     try:
         await client.admin.command("ping")
         logger.info("✅ MongoDB connected!")
-
         await albums_col.create_index([("name", 1)])
         await albums_col.create_index([("album_id", 1)], unique=True, sparse=True)
         await albums_col.create_index([("tags", 1)])
@@ -1636,14 +1772,10 @@ async def main():
         await db.granted_users.create_index([("user_id", 1)])
         await db.granted_users.create_index([("username", 1)])
         await b2_history_col.create_index([("sent_at", -1)])
-
-        granted_docs = await db.granted_users.find(
-            {"user_id": {"$ne": None}, "pending": {"$ne": True}}
-        ).to_list(500)
+        granted_docs = await db.granted_users.find({"user_id": {"$ne": None}, "pending": {"$ne": True}}).to_list(500)
         for doc in granted_docs:
             if doc.get("user_id"): granted_users.add(doc["user_id"])
         logger.info(f"✅ {len(granted_users)} granted users loaded!")
-
         logger.info("✅ Bot polling started!")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except Exception as e:

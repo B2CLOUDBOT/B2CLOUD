@@ -249,6 +249,333 @@ async def cmd_album(message: types.Message):
         )
 
     if message.from_user.id in user_sessions:
+        active = user_sessions[message.from_user.id]
+        files_count = len(active.get("photos", []))
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            types.InlineKeyboardButton(text="❌ Pehla Cancel Karo", callback_data="warn_cancel_first"),
+            types.InlineKeyboardButton(text="✅ Pehla Save Karo", callback_data="warn_save_first"),
+        )
+        return await message.answer(
+            f"⚠️ **Active Session Already Hai!**\n\n"
+            f"📁 Album: **{active.get('name', '?')}**\n"
+            f"🗂 Files: {files_count} abhi tak\n\n"
+            f"Pehle is session ko `/close` ya `/cancel` karo,\ntabhi naya album bana sakte ho!",
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+
+    user_sessions[message.from_user.id] = {
+        "mode": "create", "name": name,
+        "photos": [], "ids": set(), "started_at": now_db()
+    }
+
+    await message.answer(
+        f"📸 **Album Creation Started!**\n\n"
+        f"📁 Name: **{name}**\n"
+        f"📤 Files bhejiye (photo/video/pdf/audio)\n"
+        f"✅ Done? `/close` likhein\n"
+        f"❌ Cancel? `/cancel` likhein",
+        parse_mode="Markdown"
+    )
+
+
+# ============================================================
+# MEDIA HANDLER
+# ============================================================
+async def _handle_media(message: types.Message, file_id: str, unique_id: str, media_type: str, fname: str = "", file_size: int = 0):
+    uid = message.from_user.id
+    if uid not in user_sessions:
+        return
+    session = user_sessions[uid]
+    if unique_id in session["ids"]:
+        return await message.reply(f"🚫 Duplicate {media_type}! Skip kar diya.")
+    session["photos"].append({"file_id": file_id, "type": media_type, "name": fname, "file_size": file_size})
+    session["ids"].add(unique_id)
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    if message.from_user.id not in user_sessions: return
+    p = message.photo[-1]
+    await _handle_media(message, p.file_id, p.file_unique_id, "photo", file_size=p.file_size or 0)
+
+@dp.message(F.video)
+async def handle_video(message: types.Message):
+    if message.from_user.id not in user_sessions: return
+    await _handle_media(message, message.video.file_id, message.video.file_unique_id, "video", file_size=message.video.file_size or 0)
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    if message.from_user.id not in user_sessions: return
+    d = message.document
+    await _handle_media(message, d.file_id, d.file_unique_id, "document", d.file_name or "", file_size=d.file_size or 0)
+
+@dp.message(F.audio)
+async def handle_audio(message: types.Message):
+    if message.from_user.id not in user_sessions: return
+    await _handle_media(message, message.audio.file_id, message.audio.file_unique_id, "audio", file_size=message.audio.file_size or 0)
+
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    if message.from_user.id not in user_sessions: return
+    await _handle_media(message, message.voice.file_id, message.voice.file_unique_id, "voice", file_size=message.voice.file_size or 0)
+
+
+# ============================================================
+# Quick action callbacks
+# ============================================================
+@dp.callback_query(F.data == "quick_close")
+async def quick_close(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
+        return await callback.message.answer("⚠️ Koi active album creation session nahi hai.")
+    session = user_sessions[uid]
+    if not session["photos"]:
+        del user_sessions[uid]
+        return await callback.message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
+    auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
+    duration = (now_ist() - session["started_at"]).seconds // 60
+    photos, videos, docs, audios = count_media(session["photos"])
+    stats = ""
+    if photos: stats += f"📸 {photos} photos\n"
+    if videos: stats += f"🎥 {videos} videos\n"
+    if docs: stats += f"📄 {docs} documents\n"
+    if audios: stats += f"🎵 {audios} audio\n"
+    preview_caption = (
+        f"📝 **ALBUM PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
+        f"📁 Name: **{session['name']}**\n🆔 ID: `{auto_id}`\n{stats}"
+        f"⏱ Session: ~{duration} min\n━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
+        types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
+    )
+    first = session["photos"][0]
+    fid = first["file_id"] if isinstance(first, dict) else first
+    mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
+    try:
+        if mtype == "video":
+            await bot.send_video(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "document":
+            await bot.send_document(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        else:
+            await bot.send_photo(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    except TelegramBadRequest as e:
+        logger.error(f"Preview error: {e}")
+        await callback.message.answer("❌ Preview generate nahi ho saka.")
+
+@dp.callback_query(F.data == "quick_save_add")
+async def quick_save_add_cb(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    if uid not in user_sessions or user_sessions[uid]["mode"] != "add":
+        return await callback.message.answer("⚠️ Koi active add session nahi hai.")
+    session = user_sessions[uid]
+    if not session["photos"]:
+        del user_sessions[uid]
+        return await callback.message.answer("⚠️ Koi file nahi bheji.")
+    new_count = len(session["photos"])
+    new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
+    saved_items = []
+    for item in session["photos"]:
+        fid = item["file_id"] if isinstance(item, dict) else item
+        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+        mid, fsize = await send_to_storage(fid, mtype)
+        new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+        if mid: new_item["storage_msg_id"] = mid
+        if fsize: new_item["file_size"] = fsize
+        saved_items.append(new_item)
+        await asyncio.sleep(0.2)
+    await albums_col.update_one(
+        {"_id": session["db_id"]},
+        {
+            "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
+            "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
+            "$set": {"updated_at": now_db()}
+        }
+    )
+    await callback.message.answer(f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**", parse_mode="Markdown")
+    del user_sessions[uid]
+
+@dp.callback_query(F.data == "quick_cancel")
+async def quick_cancel_cb(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    if uid in user_sessions:
+        del user_sessions[uid]
+    await callback.message.answer("❌ Session cancel ho gaya.")
+
+
+@dp.callback_query(F.data == "warn_cancel_first")
+async def warn_cancel_first(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    if uid in user_sessions:
+        session = user_sessions[uid]
+        files_count = len(session.get("photos", []))
+        del user_sessions[uid]
+        await callback.message.edit_text(
+            f"❌ **Pehla session cancel ho gaya!**\n"
+            f"📁 {session.get('name', '?')} | 🗂 {files_count} files discard\n\n"
+            f"Ab /album se naya album banao.",
+            parse_mode="Markdown"
+        )
+    else:
+        await callback.message.edit_text("⚠️ Koi active session nahi tha.", parse_mode="Markdown")
+
+@dp.callback_query(F.data == "warn_save_first")
+async def warn_save_first(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    if uid not in user_sessions:
+        return await callback.message.edit_text("⚠️ Session expire ho gaya.", parse_mode="Markdown")
+    await callback.message.edit_text(
+        "✅ Theek hai! Pehle /close karke save karo,\nphir naya album banao.",
+        parse_mode="Markdown"
+    )
+
+# ============================================================
+# /close - Preview & Save
+# ============================================================
+@dp.message(Command("close"))
+async def cmd_close(message: types.Message):
+    uid = message.from_user.id
+    if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
+        return await message.answer("⚠️ Koi active album creation session nahi hai.")
+    logger.info(f"cmd_close called by {uid}, session photos: {len(user_sessions[uid].get('photos', []))}")
+    session = user_sessions[uid]
+    if not session["photos"]:
+        del user_sessions[uid]
+        return await message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
+    auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
+    duration = (now_db() - session["started_at"]).seconds // 60
+    photos, videos, docs, audios = count_media(session["photos"])
+    stats = ""
+    if photos: stats += f"📸 {photos} photos\n"
+    if videos: stats += f"🎥 {videos} videos\n"
+    if docs: stats += f"📄 {docs} documents\n"
+    if audios: stats += f"🎵 {audios} audio\n"
+    preview_caption = (
+        f"📝 **ALBUM PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
+        f"📁 Name: **{session['name']}**\n🆔 ID: `{auto_id}`\n{stats}"
+        f"⏱ Session: ~{duration} min\n━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
+        types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
+    )
+    first = session["photos"][0]
+    fid = first["file_id"] if isinstance(first, dict) else first
+    mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
+    try:
+        if mtype == "video":
+            await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode                {"$set": {"user_id": uid, "username": username, "full_name": message.from_user.full_name, "pending": False}}
+            )
+            logger.info(f"✅ Pending grant activated: @{username} = {uid}")
+
+    # ── Unknown user ─────────────────────────────────────────
+    if not is_admin(uid):
+        reg_code = await get_or_create_reg_code(uid)
+        is_denied = await db.denied_users.find_one({"user_id": uid}) is not None
+        prev = await db.granted_users.find_one({"user_id": uid})
+        is_old = is_denied or (prev is not None)
+        emoji_status = "🔴 old" if is_old else "🆕 new"
+        user = message.from_user
+        uname = f"@{user.username}" if user.username else "N/A"
+        grant_str = f"@{user.username}" if user.username else str(uid)
+        await bot.send_message(
+            ADMIN_ID,
+            f"👤 {user.full_name} /start\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎫 Code: *{reg_code}*\n"
+            f"🆔 User ID: `{uid}`\n"
+            f"📛 Name: {user.full_name}\n"
+            f"🔗 Username: {uname}\n"
+            f"📊 Status: {emoji_status}\n"
+            f"✅ Access: `/grant {grant_str}`",
+            parse_mode="Markdown"
+        )
+        await message.answer(
+            f"☁️ *Personal Cloud Bot*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Yeh ek private cloud storage bot hai.\n"
+            f"Abhi aapke paas is bot ka access nahi hai.\n\n"
+            f"🆔 /id — Apna User ID dekho",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ── Common commands (owner + granted both) ────────────────
+    common = (
+        "☁️ *Personal Cloud Bot*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📁 *Album Management*\n"
+        "┣ /album `<name>` — Naya album banao\n"
+        "┣ /add `<name/id>` — Files add karo\n"
+        "┣ /close — Preview & save karo\n"
+        "┣ /save\\_add — Add session save karo\n"
+        "┗ /cancel — Session cancel karo\n\n"
+        "🗂 *Organize*\n"
+        "┣ /lock `<name/id>` — Album lock karo\n"
+        "┣ /unlock `<name/id>` — Album unlock karo\n"
+        "┣ /rename `<old>` `<new>` — Album rename karo\n"
+        "┣ /merge `<id1>` `<id2>` `<name>` — Merge karo\n"
+        "┣ /tag `<name/id>` `#tag1` `#tag2` — Tags lagao\n"
+        "┗ /dlt `<name/id>` — Files selectively hatao\n\n"
+        "🔍 *View & Search*\n"
+        "┣ /albums — Saare albums dekho\n"
+        "┣ /view `<name/id>` — Album files dekho\n"
+        "┣ /view `#tag1` `#tag2` — Tag se search karo\n"
+        "┣ /info `<name/id>` — Album details\n"
+        "┗ /stats — Cloud stats\n\n"
+        "📤 *Share & Export*\n"
+        "┣ /b2 `<id>` `@u1` `@u2` — Album share karo\n"
+        "┗ /zip `<name/id>` — ZIP ya forward karo\n\n"
+        "🆔 /id — Apna User ID dekho"
+    )
+
+    # ── Owner gets extra access section ──────────────────────
+    if is_owner(uid):
+        owner_extra = (
+            "\n\n👑 *Owner Controls*\n"
+            "┣ /grant `<id/@user>` — Access do\n"
+            "┣ /denied `<id/@user>` — Access hatao\n"
+            "┣ /grantlist — Granted users dekho\n"
+            "┣ /grantlistinfo `<id>` — User ki history\n"
+            "┣ /b2list — Share history dekho\n"
+            "┗ /deniedlist — Denied users dekho"
+        )
+        await message.answer(common + owner_extra, parse_mode="Markdown")
+    else:
+        await message.answer(common, parse_mode="Markdown")
+
+
+# ============================================================
+# ALBUM CREATION - /album
+# ============================================================
+@dp.message(Command("album"))
+async def cmd_album(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/album TripName`", parse_mode="Markdown")
+
+    name = args[1].strip()
+    existing = await albums_col.find_one({"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}})
+    if existing:
+        return await message.answer(
+            f"⚠️ Album **'{name}'** already exists!\n"
+            f"ID: `{existing['album_id']}` | Files: {existing['count']}\n"
+            f"Use `/add {name}` to add more files.",
+            parse_mode="Markdown"
+        )
+
+    if message.from_user.id in user_sessions:
         del user_sessions[message.from_user.id]
 
     user_sessions[message.from_user.id] = {

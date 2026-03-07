@@ -42,6 +42,31 @@ b2_history_col = db.b2_history
 user_sessions = {}
 granted_users: set = set()
 
+# ── Registration code generator ──────────────────────────────
+async def get_or_create_reg_code(uid: int) -> str:
+    """Har user ka permanent unique registration code."""
+    existing = await db.reg_codes.find_one({"user_id": uid})
+    if existing:
+        return existing["code"]
+    # Generate next available code: A1-Z9, then AA1-AZ9 etc.
+    count = await db.reg_codes.count_documents({})
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    digits  = "123456789"
+    total   = len(letters) * len(digits)  # 234
+    if count < total:
+        l = letters[count // len(digits)]
+        d = digits[count % len(digits)]
+        code = f"{l}{d}"
+    else:
+        # Extended: AA1, AB1 ...
+        count2 = count - total
+        l1 = letters[(count2 // (len(letters) * len(digits)))]
+        l2 = letters[(count2 // len(digits)) % len(letters)]
+        d  = digits[count2 % len(digits)]
+        code = f"{l1}{l2}{d}"
+    await db.reg_codes.insert_one({"user_id": uid, "code": code, "created_at": now_db()})
+    return code
+
 
 # ============================================================
 # HELPERS
@@ -130,8 +155,27 @@ async def cmd_start(message: types.Message):
 
     # ── Unknown user ─────────────────────────────────────────
     if not is_admin(uid):
+        reg_code = await get_or_create_reg_code(uid)
+        # Check if previously granted/denied
+        prev = await db.granted_users.find_one({"user_id": uid})
+        is_old = prev is not None
+        emoji_status = "🔄 old" if is_old else "🆕 new"
+        user = message.from_user
+        uname = f"@{user.username}" if user.username else "N/A"
+        # Notify owner
+        await bot.send_message(
+            ADMIN_ID,
+            f"👤 *Unknown /start*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎫 Code: *{reg_code}*\n"
+            f"🆔 User ID: `{uid}`\n"
+            f"📛 Name: {user.full_name}\n"
+            f"🔗 Username: {uname}\n"
+            f"📊 Status: {emoji_status}",
+            parse_mode="Markdown"
+        )
+        # Reply to user
         await message.answer(
-            f"👋 Hey {first_name}!\n\n"
             f"☁️ *Personal Cloud Bot*\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Yeh ek private cloud storage bot hai.\n"
@@ -1772,6 +1816,8 @@ async def main():
         await db.granted_users.create_index([("user_id", 1)])
         await db.granted_users.create_index([("username", 1)])
         await b2_history_col.create_index([("sent_at", -1)])
+        await db.reg_codes.create_index([("user_id", 1)], unique=True)
+        await db.reg_codes.create_index([("code", 1)], unique=True)
         granted_docs = await db.granted_users.find({"user_id": {"$ne": None}, "pending": {"$ne": True}}).to_list(500)
         for doc in granted_docs:
             if doc.get("user_id"): granted_users.add(doc["user_id"])

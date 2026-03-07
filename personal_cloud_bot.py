@@ -149,7 +149,7 @@ async def cmd_start(message: types.Message):
             granted_users.add(uid)
             await db.granted_users.update_one(
                 {"username": username},
-                {"$set": {"user_id": uid, "username": username, "pending": False}}
+                {"$set": {"user_id": uid, "username": username, "full_name": message.from_user.full_name, "pending": False}}
             )
             logger.info(f"✅ Pending grant activated: @{username} = {uid}")
 
@@ -1649,13 +1649,15 @@ async def cmd_grant(message: types.Message):
         if uid == ADMIN_ID: return await message.answer("⚠️ Aap owner hain already!")
         granted_users.add(uid)
         fetched_username = None
+        fetched_fullname = None
         try:
             chat = await bot.get_chat(uid)
             fetched_username = chat.username.lower() if chat.username else None
+            fetched_fullname = chat.full_name if hasattr(chat, "full_name") else None
         except: pass
         await db.granted_users.update_one(
             {"user_id": uid},
-            {"$set": {"user_id": uid, "username": fetched_username, "granted_at": now_db(), "granted_by": message.from_user.id}},
+            {"$set": {"user_id": uid, "username": fetched_username, "full_name": fetched_fullname, "granted_at": now_db(), "granted_by": message.from_user.id}},
             upsert=True
         )
         uname_str = f"@{fetched_username}" if fetched_username else f"ID: {uid}"
@@ -1726,25 +1728,24 @@ async def cmd_grantlist(message: types.Message):
     if not users: return await message.answer("📋 Koi granted user nahi.", parse_mode="Markdown")
     text = "👥 Granted Users:\n━━━━━━━━━━━━━━━━━━\n\n"
     for u in users:
-        uid_val = u.get("user_id")
-        uname   = u.get("username")
-        pending = u.get("pending", False)
+        uid_val  = u.get("user_id")
+        uname    = u.get("username")
+        fullname = u.get("full_name", "")
+        pending  = u.get("pending", False)
         raw_date = u.get("granted_at", now_db())
         if raw_date.tzinfo is None:
             from datetime import timezone
             raw_date = raw_date.replace(tzinfo=timezone.utc)
-        date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
+        date       = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
         status     = "⏳ Pending" if pending else "✅ Active"
-        uname_line = f"@{uname}" if uname else "Username: —"
-        uid_line   = f"`{uid_val}`" if uid_val else "—"
         denied_ref = f"@{uname}" if uname else str(uid_val)
-        text += (
-            f"{status}\n"
-            f"👤 {uname_line}\n"
-            f"🆔 {uid_line}\n"
-            f"📅 {date}\n"
-            f"🚫 `/denied {denied_ref}`\n\n"
-        )
+        entry  = f"{status}\n"
+        if fullname: entry += f"📛 {fullname}\n"
+        if uname:    entry += f"👤 @{uname}\n"
+        entry += f"🆔 `{uid_val}`\n"
+        entry += f"📅 {date}\n"
+        entry += f"🚫 `/denied {denied_ref}`\n\n"
+        text += entry
     text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(users)}"
     await message.answer(text, parse_mode="Markdown")
 

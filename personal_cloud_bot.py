@@ -193,40 +193,39 @@ async def cmd_start(message: types.Message):
         "☁️ *Personal Cloud Bot*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📁 *Album Management*\n"
-        "┣ `/album <name>` — Naya album banao\n"
-        "┣ `/add <name/id>` — Files add karo\n"
-        "┣ `/close` — Preview & save karo\n"
-        "┣ `/save_add` — Add session save karo\n"
-        "┗ `/cancel` — Session cancel karo\n\n"
+        "┣ /album `<name>` — Naya album banao\n"
+        "┣ /add `<name/id>` — Files add karo\n"
+        "┣ /close — Preview & save karo\n"
+        "┣ /save_add — Add session save karo\n"
+        "┗ /cancel — Session cancel karo\n\n"
         "🗂 *Organize*\n"
-        "┣ `/lock <name/id>` — Album lock karo\n"
-        "┣ `/unlock <name/id>` — Album unlock karo\n"
-        "┣ `/rename <old> <new>` — Album rename karo\n"
-        "┣ `/merge <id1> <id2> <name>` — Merge karo\n"
-        "┣ `/tag <name/id> #tag1 #tag2` — Tags lagao\n"
-        "┗ `/dlt <name/id>` — Files selectively hatao\n\n"
+        "┣ /lock `<name/id>` — Album lock karo\n"
+        "┣ /unlock `<name/id>` — Album unlock karo\n"
+        "┣ /rename `<old>` `<new>` — Album rename karo\n"
+        "┣ /merge `<name1>` `<name2>` `<new>` — Merge karo\n"
+        "┣ /tag `<name/id>` `#tag1` — Tags lagao\n"
+        "┗ /dlt `<name/id>` — Files selectively hatao\n\n"
         "🔍 *View & Search*\n"
-        "┣ `/albums` — Saare albums dekho\n"
-        "┣ `/view <name/id>` — Album files dekho\n"
-        "┣ `/view #tag1 #tag2` — Tag se search karo\n"
-        "┣ `/info <name/id>` — Album details\n"
-        "┗ `/stats` — Cloud stats\n\n"
+        "┣ /albums — Saare albums dekho\n"
+        "┣ /view `<name/id>` — Album files dekho\n"
+        "┣ /view `#tag1` `#tag2` — Tag se search karo\n"
+        "┣ /info `<name/id>` — Album details\n"
+        "┗ /stats — Cloud stats\n\n"
         "📤 *Share & Export*\n"
-        "┣ `/b2 <id> @u1 @u2` — Album share karo\n"
-        "┗ `/zip <name/id>` — ZIP ya forward karo\n\n"
-        "🆔 `/id` — Apna User ID dekho"
+        "┣ /b2 `<name/id>` `@user` — Album share karo\n"
+        "┗ /zip `<name/id>` — ZIP ya forward karo\n\n"
+        "🆔 /id — Apna User ID dekho"
     )
 
-    # ── Owner gets extra access section ──────────────────────
     if is_owner(uid):
         owner_extra = (
             "\n\n👑 *Owner Controls*\n"
-            "┣ `/grant <id/@user>` — Access do\n"
-            "┣ `/denied <id/@user>` — Access hatao\n"
-            "┣ `/grantlist` — Granted users dekho\n"
-            "┣ `/grantlistinfo <id>` — User ki history\n"
-            "┣ `/b2list` — Share history dekho\n"
-            "┗ `/deniedlist` — Denied users dekho"
+            "┣ /grant `<id/@user>` — Access do\n"
+            "┣ /denied `<id/@user>` — Access hatao\n"
+            "┣ /grantlist — Granted users dekho\n"
+            "┣ /grantlistinfo `<id/@user>` — User ki history\n"
+            "┣ /b2list — Share history dekho\n"
+            "┗ /deniedlist — Denied users dekho"
         )
         await message.answer(common + owner_extra, parse_mode="Markdown")
     else:
@@ -1670,7 +1669,18 @@ async def cmd_grant(message: types.Message):
         if doc and doc.get("user_id"):
             uid = doc["user_id"]
             granted_users.add(uid)
-            await db.granted_users.update_one({"user_id": uid}, {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}}, upsert=True)
+            # Try to fetch full_name
+            fetched_fullname = doc.get("full_name")
+            if not fetched_fullname:
+                try:
+                    chat = await bot.get_chat(uid)
+                    fetched_fullname = chat.full_name if hasattr(chat, "full_name") else None
+                except: pass
+            await db.granted_users.update_one(
+                {"user_id": uid},
+                {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id, "full_name": fetched_fullname}},
+                upsert=True
+            )
             await message.answer(f"✅ **Access Granted!**\n👤 @{username} | 🆔 `{uid}`", parse_mode="Markdown")
             ok = await send_greeting(uid, username)
             if not ok: await message.answer("⚠️ User ko greeting nahi gayi.", parse_mode="Markdown")
@@ -1889,3 +1899,29 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ============================================================
+# /fixnames  — existing granted users ka full_name fetch karo
+# ============================================================
+@dp.message(Command("fixnames"))
+async def cmd_fixnames(message: types.Message):
+    if not is_owner(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    users = await db.granted_users.find({"user_id": {"$ne": None}}).to_list(200)
+    updated = skipped = failed = 0
+    for u in users:
+        uid_val = u.get("user_id")
+        if not uid_val: continue
+        if u.get("full_name"):
+            skipped += 1
+            continue
+        try:
+            chat = await bot.get_chat(uid_val)
+            fn = chat.full_name if hasattr(chat, "full_name") else None
+            if fn:
+                await db.granted_users.update_one({"user_id": uid_val}, {"$set": {"full_name": fn}})
+                updated += 1
+        except:
+            failed += 1
+        await asyncio.sleep(0.3)
+    await message.answer(f"✅ Names updated: {updated}\n⏭ Already had name: {skipped}\n❌ Failed: {failed}")

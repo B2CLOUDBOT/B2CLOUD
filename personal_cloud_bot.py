@@ -489,10 +489,11 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         }
     )
     add_msg_id3 = None
+    user_cb = callback.from_user
+    user_info_cb = f"@{user_cb.username}" if user_cb.username else f"ID: {user_cb.id}"
     try:
         add_msg3 = await bot.send_message(STORAGE_CHANNEL,
-            f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
-            f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
+            f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info_cb}",
             parse_mode="Markdown")
         add_msg_id3 = add_msg3.message_id
     except: pass
@@ -564,9 +565,6 @@ async def cmd_close(message: types.Message):
                 f"⏳ **Files save ho rahi hain...**\n📁 {session['name']}",
                 parse_mode="Markdown"
             )
-            try:
-                await bot.send_message(STORAGE_CHANNEL, f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}", parse_mode="Markdown")
-            except: pass
             saved_items = []
             total_new = len(session["photos"])
             for idx, item in enumerate(session["photos"], 1):
@@ -596,8 +594,7 @@ async def cmd_close(message: types.Message):
             add_msg_id = None
             try:
                 add_msg = await bot.send_message(STORAGE_CHANNEL,
-                    f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
-                    f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
+                    f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
                     parse_mode="Markdown")
                 add_msg_id = add_msg.message_id
             except: pass
@@ -871,9 +868,6 @@ async def save_add(message: types.Message):
         new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
         user = message.from_user
         user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
-        try:
-            await bot.send_message(STORAGE_CHANNEL, f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}", parse_mode="Markdown")
-        except: pass
         saved_items = []
         for item in session["photos"]:
             fid = item["file_id"] if isinstance(item, dict) else item
@@ -895,8 +889,7 @@ async def save_add(message: types.Message):
         add_msg_id2 = None
         try:
             add_msg2 = await bot.send_message(STORAGE_CHANNEL,
-                f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
-                f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
+                f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
                 parse_mode="Markdown")
             add_msg_id2 = add_msg2.message_id
         except: pass
@@ -944,16 +937,53 @@ async def cmd_rename(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     parts = message.text.split(maxsplit=1)
     text = parts[1].strip() if len(parts) > 1 else ""
-    quoted = re.findall(r"['\"](.*?)['\"]+", text)
-    if len(quoted) >= 2:
-        old_name, new_name = quoted[0].strip(), quoted[1].strip()
-    else:
-        simple = text.split()
-        if len(simple) < 2:
-            return await message.answer("❌ Usage:\n`/rename OldName NewName`\n`/rename 'Old Name' 'New Name'`\n`/rename ALB-xxx NewName`", parse_mode="Markdown")
-        old_name, new_name = simple[0], simple[1]
+    if not text:
+        return await message.answer(
+            "❌ Usage:\n"
+            "`/rename ALB-xxx New Name`\n"
+            "`/rename 'Old Name' 'New Name'`\n"
+            "`/rename OldSingleWord NewName`",
+            parse_mode="Markdown"
+        )
+
+    old_name = new_name = None
+
+    # ── Priority 1: ALB-id format — /rename ALB-xxx New Full Name ──
+    alb_match = re.match(r"^(ALB-\S+)\s+(.+)$", text, re.IGNORECASE)
+    if alb_match:
+        old_name = alb_match.group(1).strip()
+        new_name = alb_match.group(2).strip()
+
+    # ── Priority 2: Quoted format — 'old' 'new' or "old" "new" ──
+    if not old_name:
+        quoted = re.findall(r"['\"](.+?)['\"]", text)
+        if len(quoted) >= 2:
+            old_name, new_name = quoted[0].strip(), quoted[1].strip()
+
+    # ── Priority 3: Smart DB search — try every split point ──
+    if not old_name:
+        tokens = text.split()
+        found = False
+        for i in range(1, len(tokens)):
+            candidate = " ".join(tokens[:i])
+            alb = await find_album(candidate)
+            if alb:
+                old_name = candidate
+                new_name = " ".join(tokens[i:])
+                found = True
+                break
+        if not found:
+            return await message.answer(
+                "❌ Album nahi mila.\n\n"
+                "💡 ID use karo:\n`/rename ALB-xxx New Album Name`",
+                parse_mode="Markdown"
+            )
+
     album = await find_album(old_name)
-    if not album: return await message.answer(f"❌ **'{old_name}'** nahi mila.", parse_mode="Markdown")
+    if not album:
+        return await message.answer(f"❌ **'{old_name}'** nahi mila.", parse_mode="Markdown")
+    if not new_name:
+        return await message.answer("❌ Naya naam dein.", parse_mode="Markdown")
     conflict = await albums_col.find_one({"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}})
     if conflict: return await message.answer(f"⚠️ **'{new_name}'** already exists!", parse_mode="Markdown")
     await albums_col.update_one({"_id": album["_id"]}, {"$set": {"name": new_name, "updated_at": now_db()}})

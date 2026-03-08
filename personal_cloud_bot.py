@@ -548,12 +548,7 @@ async def warn_save_first(callback: types.CallbackQuery):
 async def cmd_close(message: types.Message):
     uid = message.from_user.id
 
-    # ── Case 1: View session chal raha hai — stop karo ───────
-    if uid in view_sessions:
-        view_sessions[uid] = False   # loop check karke rukh jayega
-        return await message.answer("⏹ View band kar diya!")
-
-    # ── Case 2: "add" session ─────────────────────────────────
+    # ── Case 1: "add" session ────────────────────────────────
     if uid in user_sessions and user_sessions[uid]["mode"] == "add":
         session = user_sessions[uid]
         if not session["photos"]:
@@ -628,7 +623,12 @@ async def cmd_close(message: types.Message):
         del user_sessions[uid]
         return
 
-    # ── Case 3: "create" session ──────────────────────────────
+    # ── Case 2: View session chal raha hai — stop karo ──────
+    if uid in view_sessions:
+        view_sessions[uid] = False
+        return await message.answer("⏹ View band kar diya!")
+
+    # ── Case 3: "create" session ─────────────────────────────
     if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
         return await message.answer("⚠️ Koi active session nahi hai.")
     logger.info(f"cmd_close called by {uid}, session photos: {len(user_sessions[uid].get('photos', []))}")

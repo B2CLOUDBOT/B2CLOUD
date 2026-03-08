@@ -712,11 +712,6 @@ async def process_confirm(callback: types.CallbackQuery):
                 parse_mode="Markdown"
             )
             created_msg_id = created_msg.message_id
-            # Auto-pin the "Album Created" message
-            try:
-                await bot.pin_chat_message(STORAGE_CHANNEL, created_msg_id, disable_notification=True)
-            except Exception as pe:
-                logger.warning(f"Pin failed: {pe}")
         except: pass
 
         # ── Step 1: Upload all files to storage channel ──────────

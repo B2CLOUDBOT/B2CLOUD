@@ -470,6 +470,19 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         return await callback.message.answer("⚠️ Koi file nahi bheji.")
     new_count = len(session["photos"])
     new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
+    user_cb = callback.from_user
+    user_info_cb = f"@{user_cb.username}" if user_cb.username else f"ID: {user_cb.id}"
+
+    # Step A: Header msg (iska link checklist mein jayega)
+    add_msg_id3 = None
+    try:
+        add_msg3 = await bot.send_message(STORAGE_CHANNEL,
+            f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info_cb}",
+            parse_mode="Markdown")
+        add_msg_id3 = add_msg3.message_id
+    except: pass
+
+    # Step B: Files upload
     saved_items = []
     for item in session["photos"]:
         fid = item["file_id"] if isinstance(item, dict) else item
@@ -480,6 +493,8 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         if fsize: new_item["file_size"] = fsize
         saved_items.append(new_item)
         await asyncio.sleep(0.2)
+
+    # Step C: DB update
     await albums_col.update_one(
         {"_id": session["db_id"]},
         {
@@ -488,15 +503,16 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
             "$set": {"updated_at": now_db()}
         }
     )
-    add_msg_id3 = None
-    user_cb = callback.from_user
-    user_info_cb = f"@{user_cb.username}" if user_cb.username else f"ID: {user_cb.id}"
+
+    # Step D: Summary msg
     try:
-        add_msg3 = await bot.send_message(STORAGE_CHANNEL,
-            f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info_cb}",
+        await bot.send_message(STORAGE_CHANNEL,
+            f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
+            f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
             parse_mode="Markdown")
-        add_msg_id3 = add_msg3.message_id
     except: pass
+
+    # Step E: Save add_history + checklist
     await albums_col.update_one(
         {"_id": session["db_id"]},
         {"$push": {"add_history": {"msg_id": add_msg_id3, "count": new_count, "at": now_db()}}}
@@ -565,6 +581,16 @@ async def cmd_close(message: types.Message):
                 f"⏳ **Files save ho rahi hain...**\n📁 {session['name']}",
                 parse_mode="Markdown"
             )
+            # Step A: Pehle "Files Added" header msg bhejo (iska link checklist mein jayega)
+            add_msg_id = None
+            try:
+                add_msg = await bot.send_message(STORAGE_CHANNEL,
+                    f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
+                    parse_mode="Markdown")
+                add_msg_id = add_msg.message_id
+            except: pass
+
+            # Step B: Files upload karo
             saved_items = []
             total_new = len(session["photos"])
             for idx, item in enumerate(session["photos"], 1):
@@ -583,6 +609,8 @@ async def cmd_close(message: types.Message):
                             parse_mode="Markdown"
                         )
                     except: pass
+
+            # Step C: DB update
             await albums_col.update_one(
                 {"_id": session["db_id"]},
                 {
@@ -591,14 +619,16 @@ async def cmd_close(message: types.Message):
                     "$set": {"updated_at": now_db()}
                 }
             )
-            add_msg_id = None
+
+            # Step D: Summary msg bhejo
             try:
-                add_msg = await bot.send_message(STORAGE_CHANNEL,
-                    f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
+                await bot.send_message(STORAGE_CHANNEL,
+                    f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
+                    f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
                     parse_mode="Markdown")
-                add_msg_id = add_msg.message_id
             except: pass
-            # Save add_history entry with msg_id
+
+            # Step E: Save add_history + update checklist
             await albums_col.update_one(
                 {"_id": session["db_id"]},
                 {"$push": {"add_history": {"msg_id": add_msg_id, "count": new_count, "at": now_db()}}}
@@ -868,6 +898,16 @@ async def save_add(message: types.Message):
         new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
         user = message.from_user
         user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
+        # Step A: Header msg
+        add_msg_id2 = None
+        try:
+            add_msg2 = await bot.send_message(STORAGE_CHANNEL,
+                f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
+                parse_mode="Markdown")
+            add_msg_id2 = add_msg2.message_id
+        except: pass
+
+        # Step B: Files upload
         saved_items = []
         for item in session["photos"]:
             fid = item["file_id"] if isinstance(item, dict) else item
@@ -878,6 +918,8 @@ async def save_add(message: types.Message):
             if fsize: new_item["file_size"] = fsize
             saved_items.append(new_item)
             await asyncio.sleep(0.2)
+
+        # Step C: DB update
         await albums_col.update_one(
             {"_id": session["db_id"]},
             {
@@ -886,13 +928,16 @@ async def save_add(message: types.Message):
                 "$set": {"updated_at": now_db()}
             }
         )
-        add_msg_id2 = None
+
+        # Step D: Summary msg
         try:
-            add_msg2 = await bot.send_message(STORAGE_CHANNEL,
-                f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
+            await bot.send_message(STORAGE_CHANNEL,
+                f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
+                f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
                 parse_mode="Markdown")
-            add_msg_id2 = add_msg2.message_id
         except: pass
+
+        # Step E: Save add_history + checklist
         await albums_col.update_one(
             {"_id": session["db_id"]},
             {"$push": {"add_history": {"msg_id": add_msg_id2, "count": new_count, "at": now_db()}}}

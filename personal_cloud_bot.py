@@ -99,6 +99,14 @@ def auto_generate_tags(name: str) -> list:
     return sorted(tags)
 
 
+def md(text: str) -> str:
+    """Escape special Markdown characters in dynamic text."""
+    if not text: return ""
+    for ch in ['_', '*', '[', ']', '`']:
+        text = text.replace(ch, '\\' + ch)
+    return text
+
+
 def safe_ist(dt) -> str:
     """Safely convert any datetime to IST string."""
     try:
@@ -2125,34 +2133,33 @@ async def cmd_list_all(message: types.Message):
         albums   = await albums_col.find().sort("name", 1).to_list(200)
         locked   = [a for a in albums if a.get("locked")]
         unlocked = [a for a in albums if not a.get("locked")]
-
         text = ""
 
         if locked:
-            text += "🔒 *LOCK* (`/lock`)\n"
+            text += "🔒 *LOCK*\n"
             for a in locked:
                 aid  = a.get("album_id", "N/A")
-                name = a.get("name", "Unnamed")
+                name = md(a.get("name", "Unnamed"))
                 text += f"📁 {name}\n🆔 `/unlock {aid}`\n\n"
         else:
             text += "🔒 *LOCK* — Koi locked album nahi\n\n"
 
         if unlocked:
-            text += "🔓 *UNLOCK* (`/unlock`)\n"
+            text += "🔓 *UNLOCK*\n"
             for a in unlocked:
                 aid  = a.get("album_id", "N/A")
-                name = a.get("name", "Unnamed")
+                name = md(a.get("name", "Unnamed"))
                 text += f"📁 {name}\n🆔 `/lock {aid}`\n\n"
         else:
             text += "🔓 *UNLOCK* — Koi unlocked album nahi\n\n"
 
         granted = await db.granted_users.find().to_list(100)
-        text += "👥 *Granted Users:* (`/grant`)\n━━━━━━━━━━━━━━━━━━\n\n"
+        text += "👥 *Granted Users:*\n━━━━━━━━━━━━━━━━━━\n\n"
         if granted:
             for u in granted:
                 uid_val  = u.get("user_id")
                 uname    = u.get("username")
-                fullname = u.get("full_name", "")
+                fullname = md(u.get("full_name", ""))
                 pending  = u.get("pending", False)
                 date     = safe_ist(u.get("granted_at", now_db()))
                 deny_ref = f"@{uname}" if uname else str(uid_val)
@@ -2167,12 +2174,12 @@ async def cmd_list_all(message: types.Message):
             text += "Koi granted user nahi.\n\n"
 
         denied = await db.denied_users.find().sort("denied_at", -1).to_list(100)
-        text += "🚫 *Denied Users:* (`/denied`)\n━━━━━━━━━━━━━━━━━━\n\n"
+        text += "🚫 *Denied Users:*\n━━━━━━━━━━━━━━━━━━\n\n"
         if denied:
             for u in denied:
-                uid_val  = u.get("user_id")
-                uname    = u.get("username")
-                date     = safe_ist(u.get("denied_at", now_db()))
+                uid_val   = u.get("user_id")
+                uname     = u.get("username")
+                date      = safe_ist(u.get("denied_at", now_db()))
                 grant_ref = f"@{uname}" if uname else str(uid_val)
                 if uname: text += f"👤 @{uname}\n"
                 text += f"🆔 `{uid_val}`\n"
@@ -2184,26 +2191,21 @@ async def cmd_list_all(message: types.Message):
 
         total_b2 = await b2_history_col.count_documents({})
         history  = await b2_history_col.find().sort("sent_at", -1).limit(50).to_list(50)
-        text += f"📤 *Share History all ({total_b2}):*\n\n"
+        text += f"📤 *Share History ({total_b2}):*\n\n"
         if history:
             for h in history:
-                date         = safe_ist(h.get("sent_at", now_db()))
-                sent_to_name = h.get("sent_to_name", "")
-                sent_to_id   = h.get("sent_to", "")
-                if sent_to_name and sent_to_name.startswith("@"):
-                    recipient = sent_to_name
-                elif sent_to_id:
-                    doc   = await db.granted_users.find_one({"user_id": int(sent_to_id)}) if str(sent_to_id).isdigit() else None
-                    uname = doc.get("username") if doc else None
-                    recipient = f"@{uname}" if uname else str(sent_to_id)
+                date      = safe_ist(h.get("sent_at", now_db()))
+                s_name    = h.get("sent_to_name", "")
+                s_id      = h.get("sent_to", "")
+                if s_name and s_name.startswith("@"):
+                    recipient = s_name
+                elif s_id:
+                    doc2  = await db.granted_users.find_one({"user_id": int(s_id)}) if str(s_id).isdigit() else None
+                    un2   = doc2.get("username") if doc2 else None
+                    recipient = f"@{un2}" if un2 else str(s_id)
                 else:
                     recipient = "—"
-                text += (
-                    f"📁 {h.get('album_name', 'N/A')}\n"
-                    f"➡️ To: {recipient}\n"
-                    f"🗂 {h.get('files_count', 0)} files\n"
-                    f"📅 {date}\n\n"
-                )
+                text += f"📁 {md(h.get('album_name','N/A'))}\n➡️ {recipient}\n🗂 {h.get('files_count',0)} files | 📅 {date}\n\n"
         else:
             text += "Koi share history nahi.\n"
 
@@ -2224,7 +2226,7 @@ async def cmd_list_all(message: types.Message):
 
     except Exception as e:
         logger.error(f"/list error: {e}", exc_info=True)
-        await message.answer(f"❌ Error: `{e}`", parse_mode="Markdown")
+        await message.answer(f"❌ Error: {e}")
 
 @dp.message(Command("idinfo"))
 async def cmd_idinfo(message: types.Message):
@@ -2255,7 +2257,11 @@ async def cmd_idinfo(message: types.Message):
             else:
                 text += "📁 Koi album nahi\n"
             text += "\n━━━━━━━━━━━━━━━━━━\n\n"
-        await message.answer(text, parse_mode="Markdown")
+        try:
+            await message.answer(text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"/idinfo no-args: {e}")
+            await message.answer(text)
         return
 
     # ── Mode 2: /idinfo <id/@username> — kisi bhi user ka info ──
@@ -2305,7 +2311,7 @@ async def cmd_idinfo(message: types.Message):
 
     # ── Build response ────────────────────────────────────────
     text = "👤 *User Info*\n━━━━━━━━━━━━━━━━━━\n"
-    if tg_name:    text += f"📛 {tg_name}\n"
+    if tg_name:    text += f"📛 {md(tg_name)}\n"
     if tg_username: text += f"🔗 @{tg_username}\n"
     text += f"🆔 `{target_uid}`\n"
     text += f"📊 Status: {status}\n"
@@ -2319,11 +2325,15 @@ async def cmd_idinfo(message: types.Message):
     if albums:
         for alb in albums:
             alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
-            text += f"\n• **{alb['name']}**\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
+            text += f"\n• {md(alb['name'])}\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
     else:
         text += "Koi album nahi banya.\n"
 
-    await message.answer(text, parse_mode="Markdown")
+    try:
+        await message.answer(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"/idinfo error: {e}")
+        await message.answer(text)
 
 
 # ============================================================

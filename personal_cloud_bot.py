@@ -2140,7 +2140,7 @@ async def cmd_list_all(message: types.Message):
             for a in locked:
                 aid  = a.get("album_id", "N/A")
                 name = md(a.get("name", "Unnamed"))
-                text += f"📁 {name}\n🆔 `/unlock {aid}`\n\n"
+                text += f"📁 {name}\n🔓 /unlock\_{aid}\n\n"
         else:
             text += "🔒 *LOCK* — Koi locked album nahi\n\n"
 
@@ -2149,7 +2149,7 @@ async def cmd_list_all(message: types.Message):
             for a in unlocked:
                 aid  = a.get("album_id", "N/A")
                 name = md(a.get("name", "Unnamed"))
-                text += f"📁 {name}\n🆔 `/lock {aid}`\n\n"
+                text += f"📁 {name}\n🔒 /lock\_{aid}\n\n"
         else:
             text += "🔓 *UNLOCK* — Koi unlocked album nahi\n\n"
 
@@ -2168,7 +2168,7 @@ async def cmd_list_all(message: types.Message):
                 text += f"🆔 `{uid_val}`\n"
                 text += f"📅 {date}\n"
                 if pending:  text += "⏳ Pending\n"
-                text += f"`/denied {deny_ref}`\n\n"
+                text += f"🚫 /denied {deny_ref}\n\n"
             text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(granted):02d}\n\n"
         else:
             text += "Koi granted user nahi.\n\n"
@@ -2184,7 +2184,7 @@ async def cmd_list_all(message: types.Message):
                 if uname: text += f"👤 @{uname}\n"
                 text += f"🆔 `{uid_val}`\n"
                 text += f"📅 {date}\n"
-                text += f"`/grant {grant_ref}`\n\n"
+                text += f"✅ /grant {grant_ref}\n\n"
             text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(denied):02d}\n\n"
         else:
             text += "Koi denied user nahi.\n\n"

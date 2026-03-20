@@ -99,6 +99,19 @@ def auto_generate_tags(name: str) -> list:
     return sorted(tags)
 
 
+def safe_ist(dt) -> str:
+    """Safely convert any datetime to IST string."""
+    try:
+        if dt is None:
+            return now_ist().strftime("%d %b %Y, %I:%M %p") + " IST"
+        if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
+            from datetime import timezone
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
+    except:
+        return str(dt)
+
+
 def count_media(files):
     photos = videos = docs = audios = 0
     for item in files:
@@ -1779,7 +1792,7 @@ async def cmd_b2(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer("❌ Usage: `/b2 <id\/name> @u1 @u2` ya `/b2 <id\/name> userid`", parse_mode="Markdown")
+        return await message.answer("❌ Usage: `/b2 <id/name> @u1 @u2` ya `/b2 <id/name> userid`", parse_mode="Markdown")
     text = args[1].strip()
     tokens = text.split()
     if len(tokens) < 2: return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
@@ -2108,125 +2121,110 @@ async def cmd_denied(message: types.Message):
 @dp.message(Command("list"))
 async def cmd_list_all(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
+    try:
+        albums   = await albums_col.find().sort("name", 1).to_list(200)
+        locked   = [a for a in albums if a.get("locked")]
+        unlocked = [a for a in albums if not a.get("locked")]
 
-    # ── 1. LOCKED ALBUMS ─────────────────────────────────────
-    albums   = await albums_col.find().sort("name", 1).to_list(200)
-    locked   = [a for a in albums if a.get("locked")]
-    unlocked = [a for a in albums if not a.get("locked")]
+        text = ""
 
-    text = ""
+        if locked:
+            text += "🔒 *LOCK* (`/lock`)\n"
+            for a in locked:
+                aid  = a.get("album_id", "N/A")
+                name = a.get("name", "Unnamed")
+                text += f"📁 {name}\n🆔 `/unlock {aid}`\n\n"
+        else:
+            text += "🔒 *LOCK* — Koi locked album nahi\n\n"
 
-    if locked:
-        text += "🔒 *LOCK* (/lock)\n"
-        for a in locked:
-            aid  = a.get("album_id", "N/A")
-            name = a.get("name", "Unnamed")
-            text += f"📁 {name}\n🆔 /unlock {aid}\n\n"
-    else:
-        text += "🔒 *LOCK* — Koi locked album nahi\n\n"
+        if unlocked:
+            text += "🔓 *UNLOCK* (`/unlock`)\n"
+            for a in unlocked:
+                aid  = a.get("album_id", "N/A")
+                name = a.get("name", "Unnamed")
+                text += f"📁 {name}\n🆔 `/lock {aid}`\n\n"
+        else:
+            text += "🔓 *UNLOCK* — Koi unlocked album nahi\n\n"
 
-    # ── 2. UNLOCKED ALBUMS ───────────────────────────────────
-    if unlocked:
-        text += "🔓 *UNLOCK* (/unlock)\n"
-        for a in unlocked:
-            aid  = a.get("album_id", "N/A")
-            name = a.get("name", "Unnamed")
-            text += f"📁 {name}\n🆔 /lock {aid}\n\n"
-    else:
-        text += "🔓 *UNLOCK* — Koi unlocked album nahi\n\n"
+        granted = await db.granted_users.find().to_list(100)
+        text += "👥 *Granted Users:* (`/grant`)\n━━━━━━━━━━━━━━━━━━\n\n"
+        if granted:
+            for u in granted:
+                uid_val  = u.get("user_id")
+                uname    = u.get("username")
+                fullname = u.get("full_name", "")
+                pending  = u.get("pending", False)
+                date     = safe_ist(u.get("granted_at", now_db()))
+                deny_ref = f"@{uname}" if uname else str(uid_val)
+                if fullname: text += f"📛 {fullname}\n"
+                if uname:    text += f"👤 @{uname}\n"
+                text += f"🆔 `{uid_val}`\n"
+                text += f"📅 {date}\n"
+                if pending:  text += "⏳ Pending\n"
+                text += f"`/denied {deny_ref}`\n\n"
+            text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(granted):02d}\n\n"
+        else:
+            text += "Koi granted user nahi.\n\n"
 
-    # ── 3. GRANTED USERS ─────────────────────────────────────
-    granted = await db.granted_users.find().to_list(100)
-    text += "👥 *Granted Users:* (`/grant`)\n━━━━━━━━━━━━━━━━━━\n\n"
-    if granted:
-        for u in granted:
-            uid_val  = u.get("user_id")
-            uname    = u.get("username")
-            fullname = u.get("full_name", "")
-            pending  = u.get("pending", False)
-            raw_date = u.get("granted_at", now_db())
-            if raw_date.tzinfo is None:
-                from datetime import timezone
-                raw_date = raw_date.replace(tzinfo=timezone.utc)
-            date     = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
-            deny_ref = f"@{uname}" if uname else str(uid_val)
-            if fullname: text += f"📛 {fullname}\n"
-            if uname:    text += f"👤 @{uname}\n"
-            text += f"🆔 `{uid_val}`\n"
-            text += f"📅 {date}\n"
-            if pending:  text += "⏳ Pending\n"
-            text += f"/denied {deny_ref}\n\n"
-        text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(granted):02d}\n\n"
-    else:
-        text += "Koi granted user nahi.\n\n"
+        denied = await db.denied_users.find().sort("denied_at", -1).to_list(100)
+        text += "🚫 *Denied Users:* (`/denied`)\n━━━━━━━━━━━━━━━━━━\n\n"
+        if denied:
+            for u in denied:
+                uid_val  = u.get("user_id")
+                uname    = u.get("username")
+                date     = safe_ist(u.get("denied_at", now_db()))
+                grant_ref = f"@{uname}" if uname else str(uid_val)
+                if uname: text += f"👤 @{uname}\n"
+                text += f"🆔 `{uid_val}`\n"
+                text += f"📅 {date}\n"
+                text += f"`/grant {grant_ref}`\n\n"
+            text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(denied):02d}\n\n"
+        else:
+            text += "Koi denied user nahi.\n\n"
 
-    # ── 4. DENIED USERS ──────────────────────────────────────
-    denied = await db.denied_users.find().sort("denied_at", -1).to_list(100)
-    text += "🚫 *Denied Users:* (`/denied`)\n━━━━━━━━━━━━━━━━━━\n\n"
-    if denied:
-        for u in denied:
-            uid_val  = u.get("user_id")
-            uname    = u.get("username")
-            raw_date = u.get("denied_at", now_db())
-            if raw_date.tzinfo is None:
-                from datetime import timezone
-                raw_date = raw_date.replace(tzinfo=timezone.utc)
-            date      = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
-            grant_ref = f"@{uname}" if uname else str(uid_val)
-            if uname: text += f"👤 @{uname}\n"
-            text += f"🆔 `{uid_val}`\n"
-            text += f"📅 {date}\n"
-            text += f"/grant {grant_ref}\n\n"
-        text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(denied):02d}\n\n"
-    else:
-        text += "Koi denied user nahi.\n\n"
+        total_b2 = await b2_history_col.count_documents({})
+        history  = await b2_history_col.find().sort("sent_at", -1).limit(50).to_list(50)
+        text += f"📤 *Share History all ({total_b2}):*\n\n"
+        if history:
+            for h in history:
+                date         = safe_ist(h.get("sent_at", now_db()))
+                sent_to_name = h.get("sent_to_name", "")
+                sent_to_id   = h.get("sent_to", "")
+                if sent_to_name and sent_to_name.startswith("@"):
+                    recipient = sent_to_name
+                elif sent_to_id:
+                    doc   = await db.granted_users.find_one({"user_id": int(sent_to_id)}) if str(sent_to_id).isdigit() else None
+                    uname = doc.get("username") if doc else None
+                    recipient = f"@{uname}" if uname else str(sent_to_id)
+                else:
+                    recipient = "—"
+                text += (
+                    f"📁 {h.get('album_name', 'N/A')}\n"
+                    f"➡️ To: {recipient}\n"
+                    f"🗂 {h.get('files_count', 0)} files\n"
+                    f"📅 {date}\n\n"
+                )
+        else:
+            text += "Koi share history nahi.\n"
 
-    # ── 5. SHARE HISTORY ─────────────────────────────────────
-    total_b2 = await b2_history_col.count_documents({})
-    history  = await b2_history_col.find().sort("sent_at", -1).limit(50).to_list(50)
-    text += f"📤 *Share History all ({total_b2}):*\n\n"
-    if history:
-        for h in history:
-            raw_date = h.get("sent_at", now_db())
-            if raw_date.tzinfo is None:
-                from datetime import timezone
-                raw_date = raw_date.replace(tzinfo=timezone.utc)
-            date         = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
-            sent_to_name = h.get("sent_to_name", "")
-            sent_to_id   = h.get("sent_to", "")
-            if sent_to_name and sent_to_name.startswith("@"):
-                recipient = sent_to_name
-            elif sent_to_id:
-                doc   = await db.granted_users.find_one({"user_id": int(sent_to_id)}) if str(sent_to_id).isdigit() else None
-                uname = doc.get("username") if doc else None
-                recipient = f"@{uname}" if uname else str(sent_to_id)
-            else:
-                recipient = "—"
-            text += (
-                f"📁 {h.get('album_name', 'N/A')}\n"
-                f"➡️ To: {recipient}\n"
-                f"🗂 {h.get('files_count', 0)} files\n"
-                f"📅 {date}\n\n"
-            )
-    else:
-        text += "Koi share history nahi.\n"
+        if len(text) <= 4000:
+            await message.answer(text, parse_mode="Markdown")
+        else:
+            parts = []
+            cur = ""
+            for line in text.split("\n"):
+                if len(cur) + len(line) + 1 > 3800:
+                    parts.append(cur)
+                    cur = ""
+                cur += line + "\n"
+            if cur.strip(): parts.append(cur)
+            for p in parts:
+                await message.answer(p, parse_mode="Markdown")
+                await asyncio.sleep(0.2)
 
-    # ── Send (split if too long) ──────────────────────────────
-    if len(text) <= 4000:
-        await message.answer(text, parse_mode="Markdown")
-    else:
-        parts = []
-        cur = ""
-        for line in text.split("\n"):
-            if len(cur) + len(line) + 1 > 3800:
-                parts.append(cur)
-                cur = ""
-            cur += line + "\n"
-        if cur.strip(): parts.append(cur)
-        for p in parts:
-            await message.answer(p, parse_mode="Markdown")
-            await asyncio.sleep(0.2)
-
+    except Exception as e:
+        logger.error(f"/list error: {e}", exc_info=True)
+        await message.answer(f"❌ Error: `{e}`", parse_mode="Markdown")
 
 @dp.message(Command("idinfo"))
 async def cmd_idinfo(message: types.Message):
@@ -2243,11 +2241,7 @@ async def cmd_idinfo(message: types.Message):
             uid_val  = u.get("user_id")
             uname    = u.get("username")
             fullname = u.get("full_name", "")
-            raw_date = u.get("granted_at", now_db())
-            if raw_date.tzinfo is None:
-                from datetime import timezone
-                raw_date = raw_date.replace(tzinfo=timezone.utc)
-            date = raw_date.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
+            date = safe_ist(u.get("granted_at", now_db()))
             albums = await albums_col.find({"created_by": uid_val}).sort("created_at", -1).to_list(50)
             if fullname: text += f"📛 {fullname}\n"
             if uname:    text += f"👤 @{uname}\n"
@@ -2317,24 +2311,15 @@ async def cmd_idinfo(message: types.Message):
     text += f"📊 Status: {status}\n"
 
     if granted_doc:
-        raw = granted_doc.get("granted_at", now_db())
-        if raw.tzinfo is None:
-            from datetime import timezone
-            raw = raw.replace(tzinfo=timezone.utc)
-        text += f"📅 Granted: {raw.astimezone(IST).strftime('%d %b %Y, %I:%M %p')} IST\n"
+        text += f"📅 Granted: {safe_ist(granted_doc.get('granted_at', now_db()))}\n"
     elif denied_doc:
-        raw = denied_doc.get("denied_at", now_db())
-        if raw.tzinfo is None:
-            from datetime import timezone
-            raw = raw.replace(tzinfo=timezone.utc)
-        text += f"📅 Denied: {raw.astimezone(IST).strftime('%d %b %Y, %I:%M %p')} IST\n"
+        text += f"📅 Denied: {safe_ist(denied_doc.get('denied_at', now_db()))}\n"
 
     text += f"\n📁 *Albums ({len(albums)}):*\n"
     if albums:
         for alb in albums:
-            raw_alb_date = alb.get("created_at")
-            alb_date = raw_alb_date.strftime("%d %b %Y, %I:%M %p") if raw_alb_date else "N/A"
-            text += f"\n• *{alb['name']}*\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
+            alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
+            text += f"\n• **{alb['name']}**\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
     else:
         text += "Koi album nahi banya.\n"
 

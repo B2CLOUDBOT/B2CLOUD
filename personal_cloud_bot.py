@@ -2117,21 +2117,21 @@ async def cmd_list_all(message: types.Message):
     text = ""
 
     if locked:
-        text += "🔒 *LOCK* (`/lock`)\n"
+        text += "🔒 *LOCK* (/lock)\n"
         for a in locked:
             aid  = a.get("album_id", "N/A")
             name = a.get("name", "Unnamed")
-            text += f"📁 {name}\n🆔 `/unlock {aid}`\n\n"
+            text += f"📁 {name}\n🆔 /unlock {aid}\n\n"
     else:
         text += "🔒 *LOCK* — Koi locked album nahi\n\n"
 
     # ── 2. UNLOCKED ALBUMS ───────────────────────────────────
     if unlocked:
-        text += "🔓 *UNLOCK* (`/unlock`)\n"
+        text += "🔓 *UNLOCK* (/unlock)\n"
         for a in unlocked:
             aid  = a.get("album_id", "N/A")
             name = a.get("name", "Unnamed")
-            text += f"📁 {name}\n🆔 `/lock {aid}`\n\n"
+            text += f"📁 {name}\n🆔 /lock {aid}\n\n"
     else:
         text += "🔓 *UNLOCK* — Koi unlocked album nahi\n\n"
 
@@ -2155,7 +2155,7 @@ async def cmd_list_all(message: types.Message):
             text += f"🆔 `{uid_val}`\n"
             text += f"📅 {date}\n"
             if pending:  text += "⏳ Pending\n"
-            text += f"`/denied {deny_ref}`\n\n"
+            text += f"/denied {deny_ref}\n\n"
         text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(granted):02d}\n\n"
     else:
         text += "Koi granted user nahi.\n\n"
@@ -2176,7 +2176,7 @@ async def cmd_list_all(message: types.Message):
             if uname: text += f"👤 @{uname}\n"
             text += f"🆔 `{uid_val}`\n"
             text += f"📅 {date}\n"
-            text += f"`/grant {grant_ref}`\n\n"
+            text += f"/grant {grant_ref}\n\n"
         text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(denied):02d}\n\n"
     else:
         text += "Koi denied user nahi.\n\n"
@@ -2332,8 +2332,9 @@ async def cmd_idinfo(message: types.Message):
     text += f"\n📁 *Albums ({len(albums)}):*\n"
     if albums:
         for alb in albums:
-            alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
-            text += f"\n• **{alb['name']}**\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
+            raw_alb_date = alb.get("created_at")
+            alb_date = raw_alb_date.strftime("%d %b %Y, %I:%M %p") if raw_alb_date else "N/A"
+            text += f"\n• *{alb['name']}*\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
     else:
         text += "Koi album nahi banya.\n"
 

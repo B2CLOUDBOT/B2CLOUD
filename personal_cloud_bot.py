@@ -1958,7 +1958,7 @@ async def cmd_removelist(message: types.Message):
 # ============================================================
 @dp.message(Command("setpass"))
 async def cmd_setpass(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
         return await message.answer(
@@ -1980,8 +1980,8 @@ async def cmd_setpass(message: types.Message):
 
 @dp.message(Command("removepass"))
 async def cmd_removepass(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return await message.answer("🚫 Access Denied!")
+    if not is_owner(message.from_user.id):
+        return await message.answer("🚫 Sirf owner!")
 
     args = message.text.split(maxsplit=1)
     if len(args) < 2:

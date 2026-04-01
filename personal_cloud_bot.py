@@ -75,23 +75,13 @@ def is_owner(uid): return uid == ADMIN_ID
 def is_admin(uid): return uid == ADMIN_ID or uid in granted_users
 
 async def find_album(identifier: str):
-    """
-    Album dhundho by:
-    1. Exact album_id match (ALB-xxx)
-    2. Exact name match (case-insensitive)
-    3. Partial name match (case-insensitive, contains)
-    """
     identifier = identifier.strip()
     if not identifier:
         return None
-
-    # 1. Exact album_id match
     if identifier.upper().startswith("ALB-"):
         result = await albums_col.find_one({"album_id": identifier.upper()})
         if result:
             return result
-
-    # 2. Exact name match (case-insensitive)
     try:
         result = await albums_col.find_one({
             "name": {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}
@@ -100,8 +90,6 @@ async def find_album(identifier: str):
             return result
     except Exception:
         pass
-
-    # 3. Partial name match (contains, case-insensitive)
     try:
         result = await albums_col.find_one({
             "name": {"$regex": re.escape(identifier), "$options": "i"}
@@ -110,11 +98,9 @@ async def find_album(identifier: str):
             return result
     except Exception:
         pass
-
     return None
 
 async def find_album_strict(identifier: str):
-    """Strict match only — exact name or exact album_id (for rename/merge conflict checks)."""
     identifier = identifier.strip()
     return await albums_col.find_one({
         "$or": [
@@ -140,7 +126,6 @@ def auto_generate_tags(name: str) -> list:
 
 
 def md(text: str) -> str:
-    """Escape special Markdown characters in dynamic text."""
     if not text: return ""
     for ch in ['_', '*', '[', ']', '`']:
         text = text.replace(ch, '\\' + ch)
@@ -148,7 +133,6 @@ def md(text: str) -> str:
 
 
 def safe_ist(dt) -> str:
-    """Safely convert any datetime to IST string."""
     try:
         if dt is None:
             return now_ist().strftime("%d %b %Y, %I:%M %p") + " IST"
@@ -167,13 +151,22 @@ def count_media(files):
         if t == "video": videos += 1
         elif t == "document": docs += 1
         elif t in ("audio", "voice"): audios += 1
+        elif t == "text": pass  # text items count nahi hote media mein
         else: photos += 1
     return photos, videos, docs, audios
 
-async def send_to_storage(fid: str, mtype: str):
+# ============================================================
+# CHANGE 1: send_to_storage — text type support add kiya
+# ============================================================
+async def send_to_storage(fid: str, mtype: str, text_content: str = ""):
     for attempt in range(5):
         try:
-            if mtype == "video":
+            # ── NEW: text type ──
+            if mtype == "text":
+                msg = await bot.send_message(STORAGE_CHANNEL, text_content)
+                return msg.message_id, 0
+            # ── END NEW ──
+            elif mtype == "video":
                 msg = await bot.send_video(STORAGE_CHANNEL, fid)
                 fsize = msg.video.file_size if msg.video else 0
             elif mtype == "document":
@@ -209,21 +202,18 @@ async def send_to_storage(fid: str, mtype: str):
 # CHECKLIST HELPERS
 # ============================================================
 def get_channel_id_for_link(channel_id: int) -> str:
-    """STORAGE_CHANNEL is negative like -1003454871680 → strip -100 → 3454871680"""
     s = str(channel_id)
     if s.startswith("-100"):
         return s[4:]
     return s.lstrip("-")
 
 def ordinal(n: int) -> str:
-    """1 → 01st, 2 → 02nd, 3 → 03rd, 4 → 04th ..."""
     n = int(n)
     suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     if 11 <= n % 100 <= 13: suffix = "th"
     return f"{n:02d}{suffix}"
 
 async def rebuild_checklist_text() -> str:
-    """Saare albums fetch karo aur checklist text banao with add history links."""
     setting = await db.settings.find_one({"key": "checklist_title"})
     title = setting["value"] if setting else "B2 CLOUD"
     albums = await albums_col.find().sort("created_at", 1).to_list(200)
@@ -232,14 +222,12 @@ async def rebuild_checklist_text() -> str:
     for alb in albums:
         name       = alb.get("name", "Unnamed")
         msg_id     = alb.get("created_msg_id")
-        add_history = alb.get("add_history", [])  # list of {msg_id, count, at}
-        # Album name line
+        add_history = alb.get("add_history", [])
         if msg_id:
             link = f"https://t.me/c/{ch_id}/{msg_id}"
             lines.append(f"┃ ⚜ [{name}]({link})")
         else:
             lines.append(f"┃ ⚜ {name}")
-        # Add history lines — 01st Added, 02nd Added ...
         for idx, entry in enumerate(add_history, 1):
             add_mid = entry.get("msg_id")
             if add_mid:
@@ -262,11 +250,10 @@ async def rebuild_checklist_text() -> str:
     return text
 
 async def update_checklist():
-    """Pinned checklist message ko update karo."""
     try:
         setting = await db.settings.find_one({"key": "checklist_msg_id"})
         if not setting:
-            return  # checklist exist nahi karta — skip silently
+            return
         msg_id = setting["value"]
         new_text = await rebuild_checklist_text()
         await bot.edit_message_text(
@@ -279,6 +266,38 @@ async def update_checklist():
     except Exception as e:
         logger.warning(f"Checklist update failed: {e}")
 
+
+# ============================================================
+# CHANGE 2: save_items loop helper — text items handle karta hai
+# ── Yeh helper function sabhi save loops mein use hoga ──────
+# ============================================================
+async def process_and_save_items(session_photos: list) -> list:
+    """
+    Session ke photos list ko iterate karo.
+    Text items ko send_to_storage("text") se bhejo.
+    Media items ko normal send_to_storage se bhejo.
+    Saved items list return karo.
+    """
+    saved_items = []
+    for item in session_photos:
+        fid   = item["file_id"] if isinstance(item, dict) else item
+        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+
+        if mtype == "text":
+            text_val = item.get("text", "")
+            mid, _ = await send_to_storage("", "text", text_val)
+            new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
+            if mid: new_item["storage_msg_id"] = mid
+            saved_items.append(new_item)
+        else:
+            mid, fsize = await send_to_storage(fid, mtype)
+            new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+            if mid: new_item["storage_msg_id"] = mid
+            if fsize: new_item["file_size"] = fsize
+            saved_items.append(new_item)
+
+        await asyncio.sleep(0.2)
+    return saved_items
 
 
 # ============================================================
@@ -300,7 +319,6 @@ async def cmd_start(message: types.Message):
             )
             logger.info(f"✅ Pending grant activated: @{username} = {uid}")
 
-    # ── Unknown user ─────────────────────────────────────────
     if not is_admin(uid):
         reg_code = await get_or_create_reg_code(uid)
         is_denied = await db.denied_users.find_one({"user_id": uid}) is not None
@@ -332,7 +350,6 @@ async def cmd_start(message: types.Message):
         )
         return
 
-    # ── Common commands (owner + granted both) ────────────────
     common = (
         "☁️ *Personal Cloud Bot*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -362,7 +379,6 @@ async def cmd_start(message: types.Message):
         "🆔 /id — Apna User ID dekho"
     )
 
-    # ── Owner gets extra access section ──────────────────────
     if is_owner(uid):
         owner_extra = (
             "\n\n👑 *Owner Controls*\n"
@@ -425,7 +441,7 @@ async def cmd_album(message: types.Message):
     await message.answer(
         f"📸 **Album Creation Started!**\n\n"
         f"📁 Name: **{name}**\n"
-        f"📤 Files bhejiye (photo/video/pdf/audio)\n"
+        f"📤 Files bhejiye (photo/video/pdf/audio/text)\n"
         f"✅ Done? `/close` likhein\n"
         f"❌ Cancel? `/cancel` likhein",
         parse_mode="Markdown"
@@ -504,11 +520,14 @@ async def quick_close(callback: types.CallbackQuery):
         types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
     )
-    first = session["photos"][0]
+    # Pehla non-text item dhundo preview ke liye
+    first = next((i for i in session["photos"] if isinstance(i, dict) and i.get("type") != "text"), session["photos"][0])
     fid = first["file_id"] if isinstance(first, dict) else first
     mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
     try:
-        if mtype == "video":
+        if mtype == "text":
+            await callback.message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "video":
             await bot.send_video(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         elif mtype == "document":
             await bot.send_document(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -516,7 +535,7 @@ async def quick_close(callback: types.CallbackQuery):
             await bot.send_photo(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
     except TelegramBadRequest as e:
         logger.error(f"Preview error: {e}")
-        await callback.message.answer("❌ Preview generate nahi ho saka.")
+        await callback.message.answer("❌ Preview generate nahi ho saca.")
 
 @dp.callback_query(F.data == "quick_save_add")
 async def quick_save_add_cb(callback: types.CallbackQuery):
@@ -533,7 +552,6 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
     user_cb = callback.from_user
     user_info_cb = f"@{user_cb.username}" if user_cb.username else f"ID: {user_cb.id}"
 
-    # Step A: Header msg (iska link checklist mein jayega)
     add_msg_id3 = None
     try:
         add_msg3 = await bot.send_message(STORAGE_CHANNEL,
@@ -542,19 +560,9 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         add_msg_id3 = add_msg3.message_id
     except: pass
 
-    # Step B: Files upload
-    saved_items = []
-    for item in session["photos"]:
-        fid = item["file_id"] if isinstance(item, dict) else item
-        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-        mid, fsize = await send_to_storage(fid, mtype)
-        new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-        if mid: new_item["storage_msg_id"] = mid
-        if fsize: new_item["file_size"] = fsize
-        saved_items.append(new_item)
-        await asyncio.sleep(0.2)
+    # CHANGE 3: process_and_save_items use karo (text support included)
+    saved_items = await process_and_save_items(session["photos"])
 
-    # Step C: DB update
     await albums_col.update_one(
         {"album_id": session["album_id"]},
         {
@@ -564,7 +572,6 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         }
     )
 
-    # Step D: Summary msg
     try:
         await bot.send_message(STORAGE_CHANNEL,
             f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
@@ -572,13 +579,12 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
             parse_mode="Markdown")
     except: pass
 
-    # Step E: Save add_history + checklist
     await albums_col.update_one(
         {"album_id": session["album_id"]},
         {"$push": {"add_history": {"msg_id": add_msg_id3, "count": new_count, "at": now_db()}}}
     )
     await update_checklist()
-    await callback.message.answer(f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**", parse_mode="Markdown")
+    await callback.message.answer(f"✅ **+{new_count} items** add ho gaye!\n📁 **{session['name']}**", parse_mode="Markdown")
     del user_sessions[uid]
 
 @dp.callback_query(F.data == "quick_cancel")
@@ -619,7 +625,7 @@ async def warn_save_first(callback: types.CallbackQuery):
     )
 
 # ============================================================
-# /close - Preview & Save (create mode) OR Save add session OR Stop view
+# /close
 # ============================================================
 @dp.message(Command("close"))
 async def cmd_close(message: types.Message):
@@ -631,7 +637,6 @@ async def cmd_close(message: types.Message):
         if not session["photos"]:
             del user_sessions[uid]
             return await message.answer("⚠️ Koi file nahi bheji. Session cancel.")
-        # Save karo silently (same logic as save_add)
         try:
             new_count = len(session["photos"])
             new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
@@ -641,7 +646,6 @@ async def cmd_close(message: types.Message):
                 f"⏳ **Files save ho rahi hain...**\n📁 {session['name']}",
                 parse_mode="Markdown"
             )
-            # Step A: Pehle "Files Added" header msg bhejo (iska link checklist mein jayega)
             add_msg_id = None
             try:
                 add_msg = await bot.send_message(STORAGE_CHANNEL,
@@ -650,17 +654,24 @@ async def cmd_close(message: types.Message):
                 add_msg_id = add_msg.message_id
             except: pass
 
-            # Step B: Files upload karo
-            saved_items = []
+            # CHANGE 3: process_and_save_items use karo
             total_new = len(session["photos"])
+            saved_items = []
             for idx, item in enumerate(session["photos"], 1):
-                fid = item["file_id"] if isinstance(item, dict) else item
+                fid   = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-                mid, fsize = await send_to_storage(fid, mtype)
-                new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-                if mid: new_item["storage_msg_id"] = mid
-                if fsize: new_item["file_size"] = fsize
-                saved_items.append(new_item)
+                if mtype == "text":
+                    text_val = item.get("text", "")
+                    mid, _ = await send_to_storage("", "text", text_val)
+                    new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
+                    if mid: new_item["storage_msg_id"] = mid
+                    saved_items.append(new_item)
+                else:
+                    mid, fsize = await send_to_storage(fid, mtype)
+                    new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+                    if mid: new_item["storage_msg_id"] = mid
+                    if fsize: new_item["file_size"] = fsize
+                    saved_items.append(new_item)
                 await asyncio.sleep(0.2)
                 if idx % 5 == 0 or idx == total_new:
                     try:
@@ -670,7 +681,6 @@ async def cmd_close(message: types.Message):
                         )
                     except: pass
 
-            # Step C: DB update
             await albums_col.update_one(
                 {"album_id": session["album_id"]},
                 {
@@ -680,7 +690,6 @@ async def cmd_close(message: types.Message):
                 }
             )
 
-            # Step D: Summary msg bhejo
             try:
                 await bot.send_message(STORAGE_CHANNEL,
                     f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
@@ -688,20 +697,18 @@ async def cmd_close(message: types.Message):
                     parse_mode="Markdown")
             except: pass
 
-            # Step E: Save add_history + update checklist
             await albums_col.update_one(
                 {"album_id": session["album_id"]},
                 {"$push": {"add_history": {"msg_id": add_msg_id, "count": new_count, "at": now_db()}}}
             )
             await update_checklist()
-            # Delete "uploading" msg aur send success
             try: await save_msg.delete()
             except: pass
             await message.answer(
                 f"✅ **Successfully Saved!**\n\n"
                 f"📁 Album: **{session['name']}**\n"
                 f"🆔 `{session['album_id']}`\n"
-                f"🗂 +{new_count} files added",
+                f"🗂 +{new_count} items added",
                 parse_mode="Markdown"
             )
         except Exception as e:
@@ -710,7 +717,7 @@ async def cmd_close(message: types.Message):
         del user_sessions[uid]
         return
 
-    # ── Case 2: View session chal raha hai — stop karo ──────
+    # ── Case 2: View session ─────────────────────────────────
     if uid in view_sessions:
         view_sessions[uid] = False
         return await message.answer("⏹ View band kar diya!")
@@ -741,11 +748,14 @@ async def cmd_close(message: types.Message):
         types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
     )
-    first = session["photos"][0]
+    # Pehla non-text item dhundo preview ke liye
+    first = next((i for i in session["photos"] if isinstance(i, dict) and i.get("type") != "text"), session["photos"][0])
     fid = first["file_id"] if isinstance(first, dict) else first
     mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
     try:
-        if mtype == "video":
+        if mtype == "text":
+            await message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "video":
             await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         elif mtype == "document":
             await bot.send_document(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -801,19 +811,25 @@ async def process_confirm(callback: types.CallbackQuery):
             created_msg_id = created_msg.message_id
         except: pass
 
-        # ── Step 1: Upload all files to storage channel ──────────
+        # CHANGE 3: text items ke saath save karo
         saved_items = []
         total_files = len(session["photos"])
         for idx, item in enumerate(session["photos"], 1):
-            fid = item["file_id"] if isinstance(item, dict) else item
+            fid   = item["file_id"] if isinstance(item, dict) else item
             mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-            mid, fsize = await send_to_storage(fid, mtype)
-            new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-            if mid: new_item["storage_msg_id"] = mid
-            if fsize: new_item["file_size"] = fsize
-            saved_items.append(new_item)
+            if mtype == "text":
+                text_val = item.get("text", "")
+                mid, _ = await send_to_storage("", "text", text_val)
+                new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
+                if mid: new_item["storage_msg_id"] = mid
+                saved_items.append(new_item)
+            else:
+                mid, fsize = await send_to_storage(fid, mtype)
+                new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+                if mid: new_item["storage_msg_id"] = mid
+                if fsize: new_item["file_size"] = fsize
+                saved_items.append(new_item)
             await asyncio.sleep(0.2)
-            # Progress update har 5 files pe
             if idx % 5 == 0 or idx == total_files:
                 try:
                     await save_msg.edit_text(
@@ -822,7 +838,6 @@ async def process_confirm(callback: types.CallbackQuery):
                     )
                 except: pass
 
-        # ── Step 2: Recalculate media counts from saved_items ────
         photos, videos, docs, audios = count_media(saved_items)
 
         album_doc = {
@@ -841,19 +856,16 @@ async def process_confirm(callback: types.CallbackQuery):
             "created_msg_id": created_msg_id
         }
 
-        # ── Step 3: Save to MongoDB ───────────────────────────────
         db_saved = False
         try:
             await albums_col.insert_one(album_doc)
             db_saved = True
         except Exception as e:
             logger.error(f"MongoDB insert error: {e}")
-            # Check if somehow it got saved
             existing = await albums_col.find_one({"album_id": album_id})
             if existing:
                 db_saved = True
 
-        # ── Step 4: Send "Album Saved & Stored" to storage channel ─
         stats_text = ""
         if photos: stats_text += f"📸 {photos} "
         if videos: stats_text += f"🎥 {videos} "
@@ -861,7 +873,6 @@ async def process_confirm(callback: types.CallbackQuery):
         if audios: stats_text += f"🎵 {audios} "
 
         if db_saved:
-            # Storage channel confirmation — ALWAYS send this separately
             try:
                 await bot.send_message(
                     STORAGE_CHANNEL,
@@ -875,22 +886,18 @@ async def process_confirm(callback: types.CallbackQuery):
             except Exception as e:
                 logger.error(f"Storage channel message error: {e}")
 
-            # Auto-update checklist
             await update_checklist()
 
-            # "Uploading..." wala msg delete karo
             try: await save_msg.delete()
             except: pass
-            # Preview (album thumbnail) wala msg delete karo
             try: await callback.message.delete()
             except: pass
 
-            # Clean success message
             await callback.message.answer(
                 f"✅ **Successfully Saved!**\n\n"
                 f"📁 Album: **{session['name']}**\n"
                 f"🆔 `{album_id}`\n"
-                f"🗂 {len(saved_items)} documents",
+                f"🗂 {len(saved_items)} items",
                 parse_mode="Markdown"
             )
         else:
@@ -911,7 +918,7 @@ async def process_confirm(callback: types.CallbackQuery):
 
 
 # ============================================================
-# /add - Add to existing album
+# /add
 # ============================================================
 @dp.message(Command("add"))
 async def cmd_add(message: types.Message):
@@ -936,7 +943,7 @@ async def cmd_add(message: types.Message):
     }
     await message.answer(
         f"➕ **Adding to: {album['name']}**\n🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
-        f"Files bhejein, phir `/close`\n❌ Cancel: `/cancel`",
+        f"Files bhejein (photo/video/pdf/audio/text), phir `/close`\n❌ Cancel: `/cancel`",
         parse_mode="Markdown"
     )
 
@@ -958,7 +965,6 @@ async def save_add(message: types.Message):
         new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
         user = message.from_user
         user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
-        # Step A: Header msg
         add_msg_id2 = None
         try:
             add_msg2 = await bot.send_message(STORAGE_CHANNEL,
@@ -967,19 +973,9 @@ async def save_add(message: types.Message):
             add_msg_id2 = add_msg2.message_id
         except: pass
 
-        # Step B: Files upload
-        saved_items = []
-        for item in session["photos"]:
-            fid = item["file_id"] if isinstance(item, dict) else item
-            mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-            mid, fsize = await send_to_storage(fid, mtype)
-            new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-            if mid: new_item["storage_msg_id"] = mid
-            if fsize: new_item["file_size"] = fsize
-            saved_items.append(new_item)
-            await asyncio.sleep(0.2)
+        # CHANGE 3: process_and_save_items use karo
+        saved_items = await process_and_save_items(session["photos"])
 
-        # Step C: DB update
         await albums_col.update_one(
             {"album_id": session["album_id"]},
             {
@@ -989,7 +985,6 @@ async def save_add(message: types.Message):
             }
         )
 
-        # Step D: Summary msg
         try:
             await bot.send_message(STORAGE_CHANNEL,
                 f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
@@ -997,13 +992,12 @@ async def save_add(message: types.Message):
                 parse_mode="Markdown")
         except: pass
 
-        # Step E: Save add_history + checklist
         await albums_col.update_one(
             {"album_id": session["album_id"]},
             {"$push": {"add_history": {"msg_id": add_msg_id2, "count": new_count, "at": now_db()}}}
         )
         await update_checklist()
-        await message.answer(f"✅ **+{new_count} files** add ho gayi!\n📁 **{session['name']}**", parse_mode="Markdown")
+        await message.answer(f"✅ **+{new_count} items** add ho gaye!\n📁 **{session['name']}**", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"save_add error: {e}")
         await message.answer("❌ Save error. Retry karein.")
@@ -1053,19 +1047,16 @@ async def cmd_rename(message: types.Message):
 
     old_name = new_name = None
 
-    # ── Priority 1: ALB-id format — /rename ALB-xxx New Full Name ──
     alb_match = re.match(r"^(ALB-\S+)\s+(.+)$", text, re.IGNORECASE)
     if alb_match:
         old_name = alb_match.group(1).strip()
         new_name = alb_match.group(2).strip()
 
-    # ── Priority 2: Quoted format — 'old' 'new' or "old" "new" ──
     if not old_name:
         quoted = re.findall(r"['\"](.+?)['\"]", text)
         if len(quoted) >= 2:
             old_name, new_name = quoted[0].strip(), quoted[1].strip()
 
-    # ── Priority 3: Smart DB search — try every split point ──
     if not old_name:
         tokens = text.split()
         found = False
@@ -1163,7 +1154,10 @@ async def cmd_dlt(message: types.Message):
         kb.button(text="✅ Keep", callback_data=f"dlt_toggle_{album['album_id']}_{idx}_keep")
         caption = f"File #{idx+1} | {mtype}"
         try:
-            if mtype == "video": await bot.send_video(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
+            if mtype == "text":
+                text_val = item.get("text", "") if isinstance(item, dict) else ""
+                await message.answer(f"📝 #{idx+1}: {text_val}", reply_markup=kb.as_markup())
+            elif mtype == "video": await bot.send_video(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
             elif mtype == "document": await bot.send_document(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
             else: await bot.send_photo(message.chat.id, fid, caption=caption, reply_markup=kb.as_markup())
         except: pass
@@ -1364,10 +1358,8 @@ async def cmd_list(message: types.Message):
         albums = await albums_col.find().sort("created_at", -1).to_list(length=50)
         if not albums:
             return await message.answer("📂 Cloud empty hai! /album se banayein.")
-
         total_files = sum(a.get("count", 0) for a in albums)
         locked_count = sum(1 for a in albums if a.get("locked"))
-
         lines = (
             f"☁️ *Personal Cloud*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -1379,9 +1371,7 @@ async def cmd_list(message: types.Message):
             aid  = alb.get("album_id") or "N/A"
             name = alb.get("name") or "Unnamed"
             lines += f"{icon} {name}\n🆔 `{aid}`\n\n"
-
         await message.answer(lines.strip(), parse_mode="Markdown")
-
     except Exception as e:
         logger.error(f"/albums error: {e}")
         await message.answer(f"❌ Error: {e}")
@@ -1491,37 +1481,18 @@ async def view_by_id(message: types.Message):
         query_conditions = []
         for tag in tags_input:
             query_conditions.append({"tags": {"$elemMatch": {"$regex": f"^{re.escape(tag)}", "$options": "i"}}})
-
         cursor = albums_col.find({"$and": query_conditions} if len(query_conditions) > 1 else query_conditions[0]).sort("created_at", -1)
         results = await cursor.to_list(length=50)
-
         if not results:
             return await message.answer(f"❌ '{identifier}' se koi album nahi mila.")
-
         await message.answer(f"🏷️ {identifier} — {len(results)} album(s) mila")
-
         for alb in results:
-            icon  = "🔒" if alb.get("locked") else "🔓"
             aid   = alb["album_id"]
             name  = alb.get("name", "Unnamed")
-            date  = alb.get("created_at", now_db())
-            if date.tzinfo is None:
-                from datetime import timezone
-                date = date.replace(tzinfo=timezone.utc)
             album_tags = "  ".join(alb.get("tags", []))
-            mc  = alb.get("media_count", {})
-            p = mc.get("photos",0); v = mc.get("videos",0)
-            d = mc.get("docs",0);   a = mc.get("audios",0)
-            tp = []
-            if p: tp.append(f"📸 {p}")
-            if v: tp.append(f"🎥 {v}")
-            if d: tp.append(f"📄 {d}")
-            if a: tp.append(f"🎵 {a}")
-
             icon = "🔒" if alb.get("locked") else "📁"
             card = f"{icon} {name}\n🆔 `{aid}`\n👁 `/view {aid}`"
             if album_tags: card += f"\n\n🏷️ {album_tags}"
-
             await message.answer(card, parse_mode="Markdown")
             await asyncio.sleep(0.05)
         return
@@ -1530,7 +1501,6 @@ async def view_by_id(message: types.Message):
     if not album:
         return await message.answer(f"❌ Album '{identifier}' nahi mila.")
 
-    # ── Password check (only for non-owner) ──────────────────
     uid = message.from_user.id
     album_pass = album.get("password")
     if album_pass and not is_owner(uid):
@@ -1563,17 +1533,22 @@ async def view_by_id(message: types.Message):
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
         channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
         try:
-            if channel_msg_id:
+            # CHANGE 4: text type view mein support
+            if mtype == "text":
+                text_val = item.get("text", "") if isinstance(item, dict) else ""
+                await bot.send_message(message.chat.id, text_val)
+                sent += 1
+            elif channel_msg_id:
                 await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
-            elif mtype == "video":    await bot.send_video(message.chat.id, fid)
-            elif mtype == "document": await bot.send_document(message.chat.id, fid)
-            elif mtype == "audio":    await bot.send_audio(message.chat.id, fid)
-            else:                     await bot.send_photo(message.chat.id, fid)
-            sent += 1
+                sent += 1
+            elif mtype == "video":    await bot.send_video(message.chat.id, fid); sent += 1
+            elif mtype == "document": await bot.send_document(message.chat.id, fid); sent += 1
+            elif mtype == "audio":    await bot.send_audio(message.chat.id, fid); sent += 1
+            else:                     await bot.send_photo(message.chat.id, fid); sent += 1
         except: failed += 1
         await asyncio.sleep(0.3)
     view_sessions.pop(uid, None)
-    summary = f"✅ {sent}/{len(files)} files sent!"
+    summary = f"✅ {sent}/{len(files)} items sent!"
     if failed: summary += f"\n⚠️ {failed} failed."
     await message.answer(summary)
 
@@ -1625,6 +1600,7 @@ async def cmd_zip(message: types.Message):
 
     small_files = []
     large_files = []
+    text_items  = []  # text items alag collect karo
     check_failed = 0
 
     for idx, item in enumerate(files, 1):
@@ -1632,6 +1608,12 @@ async def cmd_zip(message: types.Message):
         mtype          = item.get("type",  "photo") if isinstance(item, dict) else "photo"
         fname          = item.get("name",  "")      if isinstance(item, dict) else ""
         channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
+
+        # Text items ko alag list mein daalo
+        if mtype == "text":
+            text_val = item.get("text", "") if isinstance(item, dict) else ""
+            text_items.append((idx, text_val))
+            continue
 
         try:
             tg_file = await bot.get_file(fid)
@@ -1659,6 +1641,7 @@ async def cmd_zip(message: types.Message):
             f"📊 **{album['name']}**\n"
             f"📦 ZIP (<20 MB): {len(small_files)} files\n"
             f"📤 Direct forward (≥20 MB): {len(large_files)} files\n"
+            f"📝 Text items: {len(text_items)}\n"
             f"{'⚠️ Unreachable: ' + str(check_failed) + ' files' + chr(10) if check_failed else ''}"
             f"⏳ Processing...",
             parse_mode="Markdown"
@@ -1669,6 +1652,14 @@ async def cmd_zip(message: types.Message):
     total_zipped   = 0
     forwarded      = 0
     fwd_failed     = 0
+
+    # Text items pehle bhejo
+    if text_items:
+        for t_idx, t_val in text_items:
+            try:
+                await bot.send_message(message.chat.id, t_val)
+            except: pass
+            await asyncio.sleep(0.2)
 
     if small_files:
         try:
@@ -1784,6 +1775,8 @@ async def cmd_zip(message: types.Message):
             await asyncio.sleep(0.4)
 
     final = f"✅ **Done! — {album['name']}**\n\n"
+    if text_items:
+        final += f"📝 Text items: {len(text_items)} bheje\n"
     if zip_parts_sent:
         final += f"📦 ZIP: {zip_parts_sent} part(s) | {total_zipped} files packed\n"
     if forwarded:
@@ -1792,7 +1785,7 @@ async def cmd_zip(message: types.Message):
         final += f"⚠️ Forward failed: {fwd_failed}\n"
     if check_failed:
         final += f"❌ Unreachable: {check_failed} files\n"
-    if zip_parts_sent == 0 and forwarded == 0:
+    if zip_parts_sent == 0 and forwarded == 0 and not text_items:
         final = "❌ Koi bhi file process nahi ho saki."
 
     await status_msg.edit_text(final, parse_mode="Markdown")
@@ -1826,7 +1819,7 @@ async def cmd_stats(message: types.Message):
 
 
 # ============================================================
-# /b2 - Send album to user(s)
+# /b2
 # ============================================================
 @dp.message(Command("b2"))
 async def cmd_b2(message: types.Message):
@@ -1871,26 +1864,29 @@ async def cmd_b2(message: types.Message):
                 fid = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 try:
-                    if mtype == "video": await bot.send_video(uid, fid)
-                    elif mtype == "document": await bot.send_document(uid, fid)
-                    elif mtype == "audio": await bot.send_audio(uid, fid)
-                    else: await bot.send_photo(uid, fid)
-                    sent += 1
+                    if mtype == "text":
+                        text_val = item.get("text", "") if isinstance(item, dict) else ""
+                        await bot.send_message(uid, text_val)
+                        sent += 1
+                    elif mtype == "video": await bot.send_video(uid, fid); sent += 1
+                    elif mtype == "document": await bot.send_document(uid, fid); sent += 1
+                    elif mtype == "audio": await bot.send_audio(uid, fid); sent += 1
+                    else: await bot.send_photo(uid, fid); sent += 1
                 except: pass
                 await asyncio.sleep(0.3)
-            await bot.send_message(uid, f"✅ **{sent} files** received!", parse_mode="Markdown")
+            await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
             await b2_history_col.insert_one({
                 "album_id": album["album_id"], "album_name": album["name"],
                 "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname,
                 "files_count": sent, "sent_at": now_db()
             })
-            await message.answer(f"✅ **{uname}** ko {sent} files bhej di!", parse_mode="Markdown")
+            await message.answer(f"✅ **{uname}** ko {sent} items bhej di!", parse_mode="Markdown")
         except Exception as e:
             await message.answer(f"❌ **{uname}** ko bhejne mein error: {e}", parse_mode="Markdown")
 
 
 # ============================================================
-# /makelist  — Pehli baar checklist banana
+# /makelist
 # ============================================================
 @dp.message(Command("makelist"))
 async def cmd_makelist(message: types.Message):
@@ -1995,7 +1991,6 @@ async def cmd_removepass(message: types.Message):
     album = await find_album(identifier)
 
     if not album:
-        # Helpful error — list karo available albums
         all_albums = await albums_col.find(
             {"password": {"$exists": True, "$ne": None, "$ne": ""}},
             {"name": 1, "album_id": 1}
@@ -2033,13 +2028,30 @@ async def cmd_removepass(message: types.Message):
 
 
 # ============================================================
-# PASSWORD INPUT HANDLER
+# CHANGE 4: PASSWORD INPUT HANDLER — text/session support
 # ============================================================
 @dp.message(F.text & ~F.text.startswith("/"))
-async def handle_password_input(message: types.Message):
+async def handle_text_and_password(message: types.Message):
     uid = message.from_user.id
+
+    # ── NEW: Active session mein text save karo ──────────────
+    if uid in user_sessions:
+        session = user_sessions[uid]
+        if session.get("mode") in ("create", "add"):
+            text_content = message.text.strip()
+            if text_content:
+                session["photos"].append({
+                    "type": "text",
+                    "text": text_content,
+                    "file_id": "",
+                    "name": ""
+                })
+                await message.reply("📝 Text saved!")
+            return
+    # ── END NEW ──────────────────────────────────────────────
+
+    # ── Password handler (original logic) ───────────────────
     if uid not in password_pending: return
-    if uid in user_sessions: return
 
     pending = password_pending[uid]
     album   = pending["album"]
@@ -2077,7 +2089,7 @@ async def cmd_cancel(message: types.Message):
         session = user_sessions[uid]
         del user_sessions[uid]
         await message.answer(
-            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n_{len(session.get('photos', []))} unsaved files discard ho gayi._",
+            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n_{len(session.get('photos', []))} unsaved items discard ho gaye._",
             parse_mode="Markdown"
         )
     else:
@@ -2194,7 +2206,6 @@ async def cmd_idinfo(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
     args = message.text.split(maxsplit=1)
 
-    # ── Mode 1: /idinfo (no args) — saare granted users + unke albums ──
     if len(args) < 2:
         granted = await db.granted_users.find({"pending": {"$ne": True}}).to_list(100)
         if not granted:
@@ -2225,7 +2236,6 @@ async def cmd_idinfo(message: types.Message):
             await message.answer(text)
         return
 
-    # ── Mode 2: /idinfo <id/@username> — kisi bhi user ka info ──
     target_arg = args[1].strip()
     target_uid = None
     tg_info    = None
@@ -2311,7 +2321,7 @@ async def unknown_command(message: types.Message):
 
 
 # ============================================================
-# INLINE BUTTON CALLBACKS — do_zip_ / do_view_
+# INLINE BUTTON CALLBACKS
 # ============================================================
 @dp.callback_query(F.data.startswith("do_zip_"))
 async def cb_do_zip(callback: types.CallbackQuery):

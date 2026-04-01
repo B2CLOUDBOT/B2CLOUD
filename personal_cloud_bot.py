@@ -75,6 +75,46 @@ def is_owner(uid): return uid == ADMIN_ID
 def is_admin(uid): return uid == ADMIN_ID or uid in granted_users
 
 async def find_album(identifier: str):
+    """
+    Album dhundho by:
+    1. Exact album_id match (ALB-xxx)
+    2. Exact name match (case-insensitive)
+    3. Partial name match (case-insensitive, contains)
+    """
+    identifier = identifier.strip()
+    if not identifier:
+        return None
+
+    # 1. Exact album_id match
+    if identifier.upper().startswith("ALB-"):
+        result = await albums_col.find_one({"album_id": identifier.upper()})
+        if result:
+            return result
+
+    # 2. Exact name match (case-insensitive)
+    try:
+        result = await albums_col.find_one({
+            "name": {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}
+        })
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # 3. Partial name match (contains, case-insensitive)
+    try:
+        result = await albums_col.find_one({
+            "name": {"$regex": re.escape(identifier), "$options": "i"}
+        })
+        if result:
+            return result
+    except Exception:
+        pass
+
+    return None
+
+async def find_album_strict(identifier: str):
+    """Strict match only — exact name or exact album_id (for rename/merge conflict checks)."""
     identifier = identifier.strip()
     return await albums_col.find_one({
         "$or": [
@@ -328,7 +368,6 @@ async def cmd_start(message: types.Message):
             "\n\n👑 *Owner Controls*\n"
             "┣ /grant `<id/@user>` — Access do\n"
             "┣ /denied `<id/@user>` — Access hatao\n"
-            "┣ /list — Albums, users & share history\n"
             "┣ /idinfo — Granted users + albums\n"
             "┣ /idinfo `<id/@user>` — Kisi ka bhi info\n"
             "┣ /makelist `<title>` — Checklist banao\n"
@@ -1329,7 +1368,6 @@ async def cmd_list(message: types.Message):
         total_files = sum(a.get("count", 0) for a in albums)
         locked_count = sum(1 for a in albums if a.get("locked"))
 
-        # Sab ek message mein — sirf naam + ID
         lines = (
             f"☁️ *Personal Cloud*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -1470,7 +1508,6 @@ async def view_by_id(message: types.Message):
             if date.tzinfo is None:
                 from datetime import timezone
                 date = date.replace(tzinfo=timezone.utc)
-            date_str = date.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
             album_tags = "  ".join(alb.get("tags", []))
             mc  = alb.get("media_count", {})
             p = mc.get("photos",0); v = mc.get("videos",0)
@@ -1480,8 +1517,6 @@ async def view_by_id(message: types.Message):
             if v: tp.append(f"🎥 {v}")
             if d: tp.append(f"📄 {d}")
             if a: tp.append(f"🎵 {a}")
-            type_str = "  ".join(tp) if tp else f"🗂 {alb.get('count',0)}"
-            lock_status = "🔒 Locked" if alb.get("locked") else "🔓 Unlocked"
 
             icon = "🔒" if alb.get("locked") else "📁"
             card = f"{icon} {name}\n🆔 `{aid}`\n👁 `/view {aid}`"
@@ -1521,7 +1556,6 @@ async def view_by_id(message: types.Message):
     files = album.get("photos", [])
     sent = failed = 0
     for item in files:
-        # /close se stop check
         if not view_sessions.get(uid):
             await message.answer(f"⏹ View band kar diya.\n✅ {sent} files bhej chuke the.")
             return
@@ -1566,7 +1600,6 @@ async def cmd_zip(message: types.Message):
     if not album:
         return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
 
-    # ── Password check (only for non-owner) ──────────────────
     zip_uid = message.from_user.id
     album_pass = album.get("password")
     if album_pass and not is_owner(zip_uid):
@@ -1857,10 +1890,6 @@ async def cmd_b2(message: types.Message):
 
 
 # ============================================================
-
-
-
-# ============================================================
 # /makelist  — Pehli baar checklist banana
 # ============================================================
 @dp.message(Command("makelist"))
@@ -1869,14 +1898,12 @@ async def cmd_makelist(message: types.Message):
     args = message.text.split(maxsplit=1)
     title = args[1].strip() if len(args) > 1 else "B2 CLOUD"
 
-    # Title save karo
     await db.settings.update_one(
         {"key": "checklist_title"},
         {"$set": {"key": "checklist_title", "value": title}},
         upsert=True
     )
 
-    # Check if already exists
     existing = await db.settings.find_one({"key": "checklist_msg_id"})
     if existing:
         return await message.answer(
@@ -1886,7 +1913,6 @@ async def cmd_makelist(message: types.Message):
             parse_mode="Markdown"
         )
 
-    # Build and send checklist to storage channel
     checklist_text = await rebuild_checklist_text()
     try:
         sent = await bot.send_message(
@@ -1895,9 +1921,7 @@ async def cmd_makelist(message: types.Message):
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
-        # Pin it
         await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
-        # Save msg_id
         await db.settings.update_one(
             {"key": "checklist_msg_id"},
             {"$set": {"key": "checklist_msg_id", "value": sent.message_id}},
@@ -1953,18 +1977,59 @@ async def cmd_setpass(message: types.Message):
         parse_mode="Markdown"
     )
 
+
 @dp.message(Command("removepass"))
 async def cmd_removepass(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer("❌ Usage: `/removepass <album name/id>`", parse_mode="Markdown")
-    album = await find_album(args[1].strip())
-    if not album: return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+        return await message.answer(
+            "❌ Usage: `/removepass <album name>` ya `/removepass <ALB-xxx>`\n\n"
+            "💡 `/albums` se album ka naam ya ID dekho.",
+            parse_mode="Markdown"
+        )
+
+    identifier = args[1].strip()
+    album = await find_album(identifier)
+
+    if not album:
+        # Helpful error — list karo available albums
+        all_albums = await albums_col.find(
+            {"password": {"$exists": True, "$ne": None, "$ne": ""}},
+            {"name": 1, "album_id": 1}
+        ).to_list(20)
+
+        if all_albums:
+            names = "\n".join([f"• `{a['album_id']}` — {a['name']}" for a in all_albums])
+            return await message.answer(
+                f"❌ **'{identifier}'** se koi album nahi mila.\n\n"
+                f"🔐 Password wale albums:\n{names}\n\n"
+                f"Inhe try karein: `/removepass ALB-xxx`",
+                parse_mode="Markdown"
+            )
+        else:
+            return await message.answer(
+                f"❌ **'{identifier}'** se koi album nahi mila.\n\n"
+                f"💡 `/albums` se sahi naam ya ID check karein.",
+                parse_mode="Markdown"
+            )
+
     if not album.get("password"):
-        return await message.answer(f"⚠️ **{album['name']}** pe koi password nahi tha.", parse_mode="Markdown")
-    await albums_col.update_one({"_id": album["_id"]}, {"$unset": {"password": ""}, "$set": {"updated_at": now_db()}})
-    await message.answer(f"🔓 Password remove ho gaya!\n📁 **{album['name']}**", parse_mode="Markdown")
+        return await message.answer(
+            f"⚠️ **{album['name']}** pe koi password nahi tha.",
+            parse_mode="Markdown"
+        )
+
+    await albums_col.update_one(
+        {"_id": album["_id"]},
+        {"$unset": {"password": ""}, "$set": {"updated_at": now_db()}}
+    )
+    await message.answer(
+        f"🔓 **Password remove ho gaya!**\n📁 **{album['name']}**\n🆔 `{album['album_id']}`",
+        parse_mode="Markdown"
+    )
 
 
 # ============================================================
@@ -1974,13 +2039,12 @@ async def cmd_removepass(message: types.Message):
 async def handle_password_input(message: types.Message):
     uid = message.from_user.id
     if uid not in password_pending: return
-    if uid in user_sessions: return   # album session chal raha hai — ignore
+    if uid in user_sessions: return
 
     pending = password_pending[uid]
     album   = pending["album"]
     action  = pending["action"]
 
-    # Re-fetch latest album from DB for fresh password
     fresh = await albums_col.find_one({"_id": album["_id"]})
     if not fresh:
         del password_pending[uid]
@@ -1992,11 +2056,9 @@ async def handle_password_input(message: types.Message):
     if entered != correct:
         return await message.answer("❌ Wrong password! Dobara try karein:")
 
-    # ── Correct — proceed ────────────────────────────────────
     del password_pending[uid]
 
     if action == "view":
-        # Trigger view with correct album
         message.text = f"/view {fresh['album_id']}"
         await view_by_id(message)
 
@@ -2126,107 +2188,6 @@ async def cmd_denied(message: types.Message):
         else: await message.answer(f"⚠️ @{username} list mein nahi tha.", parse_mode="Markdown")
     else: await message.answer("❌ Valid ID ya @username dein.", parse_mode="Markdown")
 
-@dp.message(Command("list"))
-async def cmd_list_all(message: types.Message):
-    if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
-    try:
-        albums   = await albums_col.find().sort("name", 1).to_list(200)
-        locked   = [a for a in albums if a.get("locked")]
-        unlocked = [a for a in albums if not a.get("locked")]
-        text = ""
-
-        if locked:
-            text += "🔒 *LOCK*\n"
-            for a in locked:
-                aid  = a.get("album_id", "N/A")
-                name = md(a.get("name", "Unnamed"))
-                text += f"📁 {name}\n🔓 /unlock\_{aid}\n\n"
-        else:
-            text += "🔒 *LOCK* — Koi locked album nahi\n\n"
-
-        if unlocked:
-            text += "🔓 *UNLOCK*\n"
-            for a in unlocked:
-                aid  = a.get("album_id", "N/A")
-                name = md(a.get("name", "Unnamed"))
-                text += f"📁 {name}\n🔒 /lock\_{aid}\n\n"
-        else:
-            text += "🔓 *UNLOCK* — Koi unlocked album nahi\n\n"
-
-        granted = await db.granted_users.find().to_list(100)
-        text += "👥 *Granted Users:*\n━━━━━━━━━━━━━━━━━━\n\n"
-        if granted:
-            for u in granted:
-                uid_val  = u.get("user_id")
-                uname    = u.get("username")
-                fullname = md(u.get("full_name", ""))
-                pending  = u.get("pending", False)
-                date     = safe_ist(u.get("granted_at", now_db()))
-                deny_ref = f"@{uname}" if uname else str(uid_val)
-                if fullname: text += f"📛 {fullname}\n"
-                if uname:    text += f"👤 @{uname}\n"
-                text += f"🆔 `{uid_val}`\n"
-                text += f"📅 {date}\n"
-                if pending:  text += "⏳ Pending\n"
-                text += f"🚫 /denied {deny_ref}\n\n"
-            text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(granted):02d}\n\n"
-        else:
-            text += "Koi granted user nahi.\n\n"
-
-        denied = await db.denied_users.find().sort("denied_at", -1).to_list(100)
-        text += "🚫 *Denied Users:*\n━━━━━━━━━━━━━━━━━━\n\n"
-        if denied:
-            for u in denied:
-                uid_val   = u.get("user_id")
-                uname     = u.get("username")
-                date      = safe_ist(u.get("denied_at", now_db()))
-                grant_ref = f"@{uname}" if uname else str(uid_val)
-                if uname: text += f"👤 @{uname}\n"
-                text += f"🆔 `{uid_val}`\n"
-                text += f"📅 {date}\n"
-                text += f"✅ /grant {grant_ref}\n\n"
-            text += f"━━━━━━━━━━━━━━━━━━\nTotal: {len(denied):02d}\n\n"
-        else:
-            text += "Koi denied user nahi.\n\n"
-
-        total_b2 = await b2_history_col.count_documents({})
-        history  = await b2_history_col.find().sort("sent_at", -1).limit(50).to_list(50)
-        text += f"📤 *Share History ({total_b2}):*\n\n"
-        if history:
-            for h in history:
-                date      = safe_ist(h.get("sent_at", now_db()))
-                s_name    = h.get("sent_to_name", "")
-                s_id      = h.get("sent_to", "")
-                if s_name and s_name.startswith("@"):
-                    recipient = s_name
-                elif s_id:
-                    doc2  = await db.granted_users.find_one({"user_id": int(s_id)}) if str(s_id).isdigit() else None
-                    un2   = doc2.get("username") if doc2 else None
-                    recipient = f"@{un2}" if un2 else str(s_id)
-                else:
-                    recipient = "—"
-                text += f"📁 {md(h.get('album_name','N/A'))}\n➡️ {recipient}\n🗂 {h.get('files_count',0)} files | 📅 {date}\n\n"
-        else:
-            text += "Koi share history nahi.\n"
-
-        if len(text) <= 4000:
-            await message.answer(text, parse_mode="Markdown")
-        else:
-            parts = []
-            cur = ""
-            for line in text.split("\n"):
-                if len(cur) + len(line) + 1 > 3800:
-                    parts.append(cur)
-                    cur = ""
-                cur += line + "\n"
-            if cur.strip(): parts.append(cur)
-            for p in parts:
-                await message.answer(p, parse_mode="Markdown")
-                await asyncio.sleep(0.2)
-
-    except Exception as e:
-        logger.error(f"/list error: {e}", exc_info=True)
-        await message.answer(f"❌ Error: {e}")
 
 @dp.message(Command("idinfo"))
 async def cmd_idinfo(message: types.Message):
@@ -2271,12 +2232,10 @@ async def cmd_idinfo(message: types.Message):
 
     if target_arg.startswith("@"):
         uname_lookup = target_arg.lstrip("@").lower()
-        # DB mein dhundo
         doc = (await db.granted_users.find_one({"username": uname_lookup}) or
                await db.denied_users.find_one({"username": uname_lookup}))
         if doc and doc.get("user_id"):
             target_uid = doc["user_id"]
-        # Telegram se live fetch
         try:
             chat = await bot.get_chat(f"@{uname_lookup}")
             target_uid = target_uid or chat.id
@@ -2291,11 +2250,9 @@ async def cmd_idinfo(message: types.Message):
             tg_info = await bot.get_chat(target_uid)
         except: pass
 
-    # ── Telegram live info ────────────────────────────────────
     tg_name     = tg_info.full_name if tg_info and hasattr(tg_info, "full_name") else None
     tg_username = tg_info.username  if tg_info else None
 
-    # ── DB status check ───────────────────────────────────────
     granted_doc = await db.granted_users.find_one({"user_id": target_uid})
     denied_doc  = await db.denied_users.find_one({"user_id": target_uid})
     if granted_doc:
@@ -2306,10 +2263,8 @@ async def cmd_idinfo(message: types.Message):
     else:
         status = "👤 Unknown"
 
-    # ── Albums ────────────────────────────────────────────────
     albums = await albums_col.find({"created_by": target_uid}).sort("created_at", -1).to_list(50)
 
-    # ── Build response ────────────────────────────────────────
     text = "👤 *User Info*\n━━━━━━━━━━━━━━━━━━\n"
     if tg_name:    text += f"📛 {md(tg_name)}\n"
     if tg_username: text += f"🔗 @{tg_username}\n"

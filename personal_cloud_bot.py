@@ -12,6 +12,7 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.exceptions import TelegramBadRequest
+from keep_alive import start_server
 
 # ============================================================
 # CONFIGURATION
@@ -2372,7 +2373,8 @@ async def main():
         for doc in granted_docs:
             if doc.get("user_id"): granted_users.add(doc["user_id"])
         logger.info(f"✅ {len(granted_users)} granted users loaded!")
-        logger.info("✅ Bot polling started!")
+        logger.info("✅ Bot polling started!") 
+        await start_server()
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except Exception as e:
         logger.error(f"❌ Startup error: {e}")

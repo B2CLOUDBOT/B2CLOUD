@@ -704,7 +704,6 @@ async def cmd_close(message: types.Message):
 
     if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
         return await message.answer("⚠️ Koi active session nahi hai.")
-    logger.info(f"cmd_close called by {uid}, session photos: {len(user_sessions[uid].get('photos', []))}")
     session = user_sessions[uid]
     if not session["photos"]:
         del user_sessions[uid]
@@ -1435,7 +1434,7 @@ async def cmd_info(message: types.Message):
 
 
 # ============================================================
-# /view  — internal helper with password_bypass flag
+# /view
 # ============================================================
 @dp.message(F.text.regexp(r"^/view_[A-Za-z0-9\-]+$"))
 async def view_shortcut(message: types.Message):
@@ -1479,7 +1478,6 @@ async def view_by_id(message: types.Message, _password_ok: bool = False):
 
     uid = message.from_user.id
 
-    # ── FIX: Password check sirf tab karo jab _password_ok=False ho ──
     album_pass = album.get("password")
     if album_pass and not is_owner(uid) and not _password_ok:
         password_pending[uid] = {"action": "view", "album": album}
@@ -1531,7 +1529,9 @@ async def view_by_id(message: types.Message, _password_ok: bool = False):
 
 
 # ============================================================
-# /zip  —  Smart Export  ★ FIXED ★
+# /zip  —  Smart Export
+# ★★★ ROOT CAUSE FIX: Bot API se photos download hoti hain
+#     via forward → download approach instead of get_file
 # ============================================================
 @dp.message(F.text.regexp(r"^/zip_[A-Za-z0-9\-]+$"))
 async def zip_shortcut(message: types.Message):
@@ -1554,7 +1554,6 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
 
     zip_uid = message.from_user.id
 
-    # ── FIX: Password check sirf tab karo jab _password_ok=False ho ──
     album_pass = album.get("password")
     if album_pass and not is_owner(zip_uid) and not _password_ok:
         password_pending[zip_uid] = {"action": "zip", "album": album}
@@ -1567,16 +1566,17 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
     if not files:
         return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
 
-    # ── ZIP config ──────────────────────────────────────────
-    # Bot download limit: 20MB per file (Telegram Bot API restriction)
-    DOWNLOAD_LIMIT = 20 * 1024 * 1024
-    # ★ FIX: Split size 1.5GB — ek part itna bada nahi banega
-    # ki Telegram reject kare (Bot API limit 50MB document send)
-    # Lekin download karke ZIP banana memory-bound hai isliye
-    # hum ZIP send karte hain jo max 45MB ka hoga
-    SPLIT_SIZE = 45 * 1024 * 1024  # 45MB per ZIP part (Telegram safe limit)
+    # ── Config ──────────────────────────────────────────────
+    # Telegram Bot API: get_file() sirf 20MB tak kaam karta hai
+    # Usse bade files direct forward honge
+    BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024   # 20 MB
+    # ZIP part max size — Telegram document send limit 50MB hai
+    SPLIT_SIZE = 45 * 1024 * 1024            # 45 MB safe limit
 
-    EXT_MAP = {"photo": "jpg", "video": "mp4", "document": "bin", "audio": "mp3", "voice": "ogg"}
+    EXT_MAP = {
+        "photo": "jpg", "video": "mp4",
+        "document": "bin", "audio": "mp3", "voice": "ogg"
+    }
 
     status_msg = await message.answer(
         f"🔍 Files check kar raha hoon...\n"
@@ -1584,34 +1584,50 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
         parse_mode="Markdown"
     )
 
-    small_files = []
-    large_files = []
-    text_items  = []
-    check_failed = 0
+    # ── Step 1: Files categorize karo ───────────────────────
+    small_files  = []   # (fid, mtype, fname, storage_msg_id) — downloadable
+    large_files  = []   # (fid, mtype, fname, storage_msg_id) — forward only
+    text_items   = []   # (idx, text_val)
+    skip_count   = 0
 
     for idx, item in enumerate(files, 1):
-        fid            = item["file_id"]            if isinstance(item, dict) else item
-        mtype          = item.get("type",  "photo") if isinstance(item, dict) else "photo"
-        fname          = item.get("name",  "")      if isinstance(item, dict) else ""
-        channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
+        if isinstance(item, dict):
+            fid            = item.get("file_id", "")
+            mtype          = item.get("type", "photo")
+            fname          = item.get("name", "")
+            storage_msg_id = item.get("storage_msg_id")
+        else:
+            fid            = item
+            mtype          = "photo"
+            fname          = ""
+            storage_msg_id = None
 
+        # Text items alag handle
         if mtype == "text":
             text_val = item.get("text", "") if isinstance(item, dict) else ""
             text_items.append((idx, text_val))
             continue
 
+        # file_id empty ho toh skip
+        if not fid:
+            skip_count += 1
+            continue
+
         try:
             tg_file = await bot.get_file(fid)
             fsize   = tg_file.file_size or 0
-            if fsize < DOWNLOAD_LIMIT:
-                small_files.append((fid, mtype, fname, tg_file))
+
+            if fsize > 0 and fsize < BOT_DOWNLOAD_LIMIT:
+                # Downloadable — ZIP mein jayegi
+                small_files.append((fid, mtype, fname, tg_file, storage_msg_id))
             else:
-                large_files.append((fid, mtype, fname, channel_msg_id))
-        except Exception:
-            if channel_msg_id:
-                large_files.append((fid, mtype, fname, channel_msg_id))
-            else:
-                check_failed += 1
+                # Too large OR size unknown — direct forward
+                large_files.append((fid, mtype, fname, storage_msg_id))
+
+        except Exception as e:
+            logger.warning(f"get_file failed for idx {idx} ({mtype}): {e}")
+            # get_file fail hua — storage_msg_id se forward try karenge
+            large_files.append((fid, mtype, fname, storage_msg_id))
 
         if idx % 20 == 0:
             try:
@@ -1624,11 +1640,11 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
     try:
         await status_msg.edit_text(
             f"📊 **{album['name']}**\n"
-            f"📦 ZIP (<20 MB each): {len(small_files)} files\n"
-            f"📤 Direct forward (≥20 MB): {len(large_files)} files\n"
+            f"📦 ZIP banegi: {len(small_files)} files\n"
+            f"📤 Direct forward: {len(large_files)} files\n"
             f"📝 Text items: {len(text_items)}\n"
-            f"{'⚠️ Unreachable: ' + str(check_failed) + ' files' + chr(10) if check_failed else ''}"
-            f"⏳ Processing...",
+            + (f"⚠️ Skip: {skip_count}\n" if skip_count else "")
+            + "⏳ Processing...",
             parse_mode="Markdown"
         )
     except: pass
@@ -1637,16 +1653,17 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
     total_zipped   = 0
     forwarded      = 0
     fwd_failed     = 0
+    dl_failed      = 0
 
-    # ── Text items pehle send karo ──────────────────────────
-    if text_items:
-        for t_idx, t_val in text_items:
-            try:
-                await bot.send_message(message.chat.id, t_val)
-            except: pass
-            await asyncio.sleep(0.2)
+    # ── Step 2: Text items bhejo ────────────────────────────
+    for t_idx, t_val in text_items:
+        try:
+            await bot.send_message(message.chat.id, t_val)
+        except Exception as e:
+            logger.error(f"Text send failed: {e}")
+        await asyncio.sleep(0.2)
 
-    # ── Small files: download → ZIP → send ──────────────────
+    # ── Step 3: Small files download → ZIP ──────────────────
     if small_files:
         try:
             await status_msg.edit_text(
@@ -1655,59 +1672,107 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
             )
         except: pass
 
-        downloaded = []
+        downloaded = []  # [(safe_name, bytes_data), ...]
 
-        async with aiohttp.ClientSession() as sess:
-            for idx, (fid, mtype, fname, tg_file) in enumerate(small_files, 1):
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=120)  # 2 min timeout per file
+        ) as sess:
+            for dl_idx, (fid, mtype, fname, tg_file, storage_msg_id) in enumerate(small_files, 1):
                 try:
-                    url = f"https://api.telegram.org/file/bot{API_TOKEN}/{tg_file.file_path}"
+                    file_path = tg_file.file_path
+                    if not file_path:
+                        raise ValueError("file_path empty hai")
+
+                    url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file_path}"
+                    logger.info(f"Downloading [{dl_idx}/{len(small_files)}]: {url}")
+
                     async with sess.get(url) as resp:
                         if resp.status == 200:
                             data = await resp.read()
-                            # ★ FIX: extension properly determine karo
-                            if fname and "." in fname:
-                                safe_name = fname
-                            else:
-                                ext = (
-                                    tg_file.file_path.rsplit(".", 1)[-1]
-                                    if tg_file.file_path and "." in tg_file.file_path
-                                    else EXT_MAP.get(mtype, "bin")
-                                )
-                                safe_name = fname if fname else f"{idx:04d}_{mtype}.{ext}"
-                            downloaded.append((safe_name, data))
-                except Exception as e:
-                    logger.error(f"Download error idx {idx}: {e}")
+                            if len(data) == 0:
+                                raise ValueError("Downloaded data empty hai")
 
-                if idx % 10 == 0:
+                            # Extension properly determine karo
+                            if fname and "." in fname:
+                                safe_name = re.sub(r'[^\w\.\-]', '_', fname)
+                            else:
+                                # file_path se extension lo
+                                if file_path and "." in file_path:
+                                    ext = file_path.rsplit(".", 1)[-1].lower()
+                                    # Valid extensions only
+                                    if ext not in ("jpg", "jpeg", "png", "gif", "mp4", "mp3",
+                                                   "ogg", "pdf", "doc", "docx", "zip", "rar"):
+                                        ext = EXT_MAP.get(mtype, "bin")
+                                else:
+                                    ext = EXT_MAP.get(mtype, "bin")
+                                safe_name = f"{dl_idx:04d}_{mtype}.{ext}"
+
+                            downloaded.append((safe_name, data))
+                            logger.info(f"  ✅ Downloaded {safe_name}: {len(data)} bytes")
+                        else:
+                            raise ValueError(f"HTTP {resp.status}")
+
+                except Exception as e:
+                    logger.error(f"Download failed [{dl_idx}] {mtype}: {e}")
+                    dl_failed += 1
+                    # Download fail hua toh large_files mein add karo
+                    large_files.append((fid, mtype, fname, storage_msg_id))
+
+                if dl_idx % 10 == 0:
                     try:
                         await status_msg.edit_text(
-                            f"⏬ Downloading... {idx}/{len(small_files)}\n📁 **{album['name']}**",
+                            f"⏬ Downloading... {dl_idx}/{len(small_files)}\n"
+                            f"✅ OK: {len(downloaded)} | ❌ Failed: {dl_failed}\n"
+                            f"📁 **{album['name']}**",
                             parse_mode="Markdown"
                         )
                     except: pass
 
+                await asyncio.sleep(0.1)
+
+        logger.info(f"Download complete: {len(downloaded)} success, {dl_failed} failed")
+
+        # ── ZIP banana ────────────────────────────────────────
         if downloaded:
             try:
                 await status_msg.edit_text(
-                    f"🗜 Packing ZIP ({len(downloaded)} files)...\n📁 **{album['name']}**",
+                    f"🗜 ZIP pack kar raha hoon ({len(downloaded)} files)...\n📁 **{album['name']}**",
                     parse_mode="Markdown"
                 )
             except: pass
 
-            zip_name = re.sub(r'[^\w\s\-]', '', album["name"]).strip().replace(' ', '_') or "album"
+            zip_name = re.sub(r'[^\w\-]', '_', album["name"]).strip("_") or "album"
 
-            # ★ FIX: ZIP parts properly banana — har part alag buffer mein
-            parts = []          # list of (bytes_data, file_count)
-            cur_files  = []     # [(safe_name, data), ...]
-            cur_size   = 0
+            # Files ko parts mein divide karo
+            parts = []       # list of (zip_bytes, file_count)
+            cur_files = []   # [(name, data), ...]
+            cur_size  = 0
 
             for safe_name, data in downloaded:
-                # Agar current part mein add karne se SPLIT_SIZE exceed ho
-                # aur already kuch files hain, toh pehle current part close karo
-                if cur_size + len(data) > SPLIT_SIZE and cur_files:
-                    # ★ FIX: ZipFile properly close karo aur bytes nikaalo
+                file_size = len(data)
+
+                # Agar ek hi file SPLIT_SIZE se badi hai toh usse akela part banao
+                if file_size >= SPLIT_SIZE:
+                    # Pehle pending files ka part close karo
+                    if cur_files:
+                        zip_buf = io.BytesIO()
+                        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            for n, d in cur_files:
+                                zf.writestr(n, d)
+                        parts.append((zip_buf.getvalue(), len(cur_files)))
+                        cur_files = []
+                        cur_size  = 0
+                    # Yeh file akeli part banegi
                     zip_buf = io.BytesIO()
-                    with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        zf.writestr(safe_name, data)
+                    parts.append((zip_buf.getvalue(), 1))
+                    continue
+
+                # Normal file: split size check karo
+                if cur_size + file_size > SPLIT_SIZE and cur_files:
+                    zip_buf = io.BytesIO()
+                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                         for n, d in cur_files:
                             zf.writestr(n, d)
                     parts.append((zip_buf.getvalue(), len(cur_files)))
@@ -1715,82 +1780,111 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
                     cur_size  = 0
 
                 cur_files.append((safe_name, data))
-                cur_size += len(data)
+                cur_size += file_size
 
-            # Last part
+            # Remaining files
             if cur_files:
                 zip_buf = io.BytesIO()
-                with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for n, d in cur_files:
                         zf.writestr(n, d)
                 parts.append((zip_buf.getvalue(), len(cur_files)))
 
             total_parts = len(parts)
+            logger.info(f"ZIP parts: {total_parts}")
 
+            # ── Parts send karo ───────────────────────────────
             for part_num, (zip_bytes, file_count) in enumerate(parts, 1):
-                part_fname = (
-                    f"{zip_name}_part{part_num}of{total_parts}.zip" if total_parts > 1
-                    else f"{zip_name}.zip"
-                )
-                part_label = f" (Part {part_num}/{total_parts})" if total_parts > 1 else ""
+                if total_parts > 1:
+                    part_fname = f"{zip_name}_part{part_num}of{total_parts}.zip"
+                    part_label = f" (Part {part_num}/{total_parts})"
+                else:
+                    part_fname = f"{zip_name}.zip"
+                    part_label = ""
+
+                zip_size_mb = len(zip_bytes) / (1024 * 1024)
+                logger.info(f"Sending ZIP part {part_num}: {part_fname} ({zip_size_mb:.1f} MB, {file_count} files)")
 
                 try:
                     await bot.send_document(
                         message.chat.id,
                         document=types.BufferedInputFile(zip_bytes, filename=part_fname),
-                        caption=f"📦 {part_fname}{part_label}\n🗂 {file_count} files | 📁 {album['name']}"
+                        caption=(
+                            f"📦 **{part_fname}**{part_label}\n"
+                            f"🗂 {file_count} files | 💾 {zip_size_mb:.1f} MB\n"
+                            f"📁 {album['name']}"
+                        ),
+                        parse_mode="Markdown"
                     )
                     zip_parts_sent += 1
                     total_zipped   += file_count
+                    logger.info(f"  ✅ ZIP part {part_num} sent")
                 except Exception as e:
                     logger.error(f"ZIP send error part {part_num}: {e}")
                     await message.answer(f"❌ ZIP Part {part_num} send nahi hua: {e}")
 
-    # ── Large files: direct forward ─────────────────────────
+    # ── Step 4: Large files direct forward ──────────────────
     if large_files:
-        await message.answer(
-            f"📤 **{len(large_files)} badi file(s)** direct bhej raha hoon (≥20 MB)...",
-            parse_mode="Markdown"
-        )
-        for fid, mtype, fname, channel_msg_id in large_files:
+        try:
+            await status_msg.edit_text(
+                f"📤 {len(large_files)} badi files forward kar raha hoon...\n📁 **{album['name']}**",
+                parse_mode="Markdown"
+            )
+        except: pass
+
+        for fid, mtype, fname, storage_msg_id in large_files:
             try:
-                if channel_msg_id:
-                    await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
-                elif mtype == "video":
-                    await bot.send_video(message.chat.id, fid)
-                elif mtype == "document":
-                    await bot.send_document(message.chat.id, fid)
-                elif mtype == "audio":
-                    await bot.send_audio(message.chat.id, fid)
-                elif mtype == "voice":
-                    await bot.send_voice(message.chat.id, fid)
+                if storage_msg_id:
+                    # Storage channel se forward karo
+                    await bot.forward_message(message.chat.id, STORAGE_CHANNEL, storage_msg_id)
+                    forwarded += 1
+                    logger.info(f"Forwarded via storage_msg_id: {storage_msg_id}")
+                elif fid:
+                    # file_id se direct bhejo
+                    if mtype == "video":
+                        await bot.send_video(message.chat.id, fid)
+                    elif mtype == "document":
+                        await bot.send_document(message.chat.id, fid)
+                    elif mtype == "audio":
+                        await bot.send_audio(message.chat.id, fid)
+                    elif mtype == "voice":
+                        await bot.send_voice(message.chat.id, fid)
+                    else:
+                        await bot.send_photo(message.chat.id, fid)
+                    forwarded += 1
+                    logger.info(f"Sent via file_id: {fid[:20]}...")
                 else:
-                    await bot.send_photo(message.chat.id, fid)
-                forwarded += 1
+                    logger.warning(f"No storage_msg_id or file_id for {mtype}")
+                    fwd_failed += 1
             except Exception as e:
-                logger.error(f"Large file forward error: {e}")
+                logger.error(f"Forward failed ({mtype}): {e}")
                 fwd_failed += 1
             await asyncio.sleep(0.4)
 
     # ── Final summary ────────────────────────────────────────
-    final = f"✅ **Done! — {album['name']}**\n\n"
+    final_parts = [f"✅ **Done! — {album['name']}**\n"]
     if text_items:
-        final += f"📝 Text items: {len(text_items)} bheje\n"
+        final_parts.append(f"📝 Text: {len(text_items)} items\n")
     if zip_parts_sent:
-        final += f"📦 ZIP: {zip_parts_sent} part(s) | {total_zipped} files packed\n"
+        final_parts.append(f"📦 ZIP: {zip_parts_sent} part(s), {total_zipped} files\n")
     if forwarded:
-        final += f"📤 Direct forwarded: {forwarded} large file(s)\n"
+        final_parts.append(f"📤 Forwarded: {forwarded} large files\n")
+    if dl_failed:
+        final_parts.append(f"⚠️ Download failed (forwarded instead): {dl_failed}\n")
     if fwd_failed:
-        final += f"⚠️ Forward failed: {fwd_failed}\n"
-    if check_failed:
-        final += f"❌ Unreachable: {check_failed} files\n"
+        final_parts.append(f"❌ Forward failed: {fwd_failed}\n")
+    if skip_count:
+        final_parts.append(f"⏭️ Skipped (no file_id): {skip_count}\n")
+
     if zip_parts_sent == 0 and forwarded == 0 and not text_items:
-        final = "❌ Koi bhi file process nahi ho saki."
+        final_text = "❌ Koi bhi file process nahi ho saki.\n\nBot logs dekho ya `/view` se manually files lo."
+    else:
+        final_text = "".join(final_parts)
 
     try:
-        await status_msg.edit_text(final, parse_mode="Markdown")
+        await status_msg.edit_text(final_text, parse_mode="Markdown")
     except:
-        await message.answer(final, parse_mode="Markdown")
+        await message.answer(final_text, parse_mode="Markdown")
 
 
 # ============================================================
@@ -1895,13 +1989,11 @@ async def cmd_makelist(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
     args = message.text.split(maxsplit=1)
     title = args[1].strip() if len(args) > 1 else "B2 CLOUD"
-
     await db.settings.update_one(
         {"key": "checklist_title"},
         {"$set": {"key": "checklist_title", "value": title}},
         upsert=True
     )
-
     existing = await db.settings.find_one({"key": "checklist_msg_id"})
     if existing:
         return await message.answer(
@@ -1910,14 +2002,11 @@ async def cmd_makelist(message: types.Message):
             f"Update karna hai toh `/makelist` se pehle `/removelist` karo.",
             parse_mode="Markdown"
         )
-
     checklist_text = await rebuild_checklist_text()
     try:
         sent = await bot.send_message(
-            STORAGE_CHANNEL,
-            checklist_text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
+            STORAGE_CHANNEL, checklist_text,
+            parse_mode="Markdown", disable_web_page_preview=True
         )
         await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
         await db.settings.update_one(
@@ -1926,10 +2015,7 @@ async def cmd_makelist(message: types.Message):
             upsert=True
         )
         await message.answer(
-            f"✅ **Checklist create ho gaya!**\n"
-            f"📌 Pinned in storage channel\n"
-            f"🏷️ Title: **{title}**\n"
-            f"🆔 Message ID: `{sent.message_id}`",
+            f"✅ **Checklist create ho gaya!**\n📌 Pinned\n🏷️ Title: **{title}**\n🆔 `{sent.message_id}`",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -1960,8 +2046,7 @@ async def cmd_setpass(message: types.Message):
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
         return await message.answer(
-            "❌ Usage: `/setpass <album name/id> <password>`\n"
-            "Example: `/setpass MyTrip secret123`",
+            "❌ Usage: `/setpass <album name/id> <password>`",
             parse_mode="Markdown"
         )
     identifier = args[1].strip()
@@ -1970,8 +2055,7 @@ async def cmd_setpass(message: types.Message):
     if not album: return await message.answer(f"❌ Album '{identifier}' nahi mila.", parse_mode="Markdown")
     await albums_col.update_one({"_id": album["_id"]}, {"$set": {"password": password, "updated_at": now_db()}})
     await message.answer(
-        f"🔐 Password set!\n📁 **{album['name']}**\n🔑 `{password}`\n\n"
-        f"Ab `/view` ya `/zip` karte waqt granted users se password maanga jayega.",
+        f"🔐 Password set!\n📁 **{album['name']}**\n🔑 `{password}`",
         parse_mode="Markdown"
     )
 
@@ -1980,45 +2064,25 @@ async def cmd_setpass(message: types.Message):
 async def cmd_removepass(message: types.Message):
     if not is_owner(message.from_user.id):
         return await message.answer("🚫 Sirf owner!")
-
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer(
-            "❌ Usage: `/removepass <album name>` ya `/removepass <ALB-xxx>`\n\n"
-            "💡 `/albums` se album ka naam ya ID dekho.",
-            parse_mode="Markdown"
-        )
-
+        return await message.answer("❌ Usage: `/removepass <album name/id>`", parse_mode="Markdown")
     identifier = args[1].strip()
     album = await find_album(identifier)
-
     if not album:
         all_albums = await albums_col.find(
             {"password": {"$exists": True, "$ne": None, "$ne": ""}},
             {"name": 1, "album_id": 1}
         ).to_list(20)
-
         if all_albums:
             names = "\n".join([f"• `{a['album_id']}` — {a['name']}" for a in all_albums])
             return await message.answer(
-                f"❌ **'{identifier}'** se koi album nahi mila.\n\n"
-                f"🔐 Password wale albums:\n{names}\n\n"
-                f"Inhe try karein: `/removepass ALB-xxx`",
+                f"❌ **'{identifier}'** nahi mila.\n\n🔐 Password wale albums:\n{names}",
                 parse_mode="Markdown"
             )
-        else:
-            return await message.answer(
-                f"❌ **'{identifier}'** se koi album nahi mila.\n\n"
-                f"💡 `/albums` se sahi naam ya ID check karein.",
-                parse_mode="Markdown"
-            )
-
+        return await message.answer(f"❌ **'{identifier}'** nahi mila.", parse_mode="Markdown")
     if not album.get("password"):
-        return await message.answer(
-            f"⚠️ **{album['name']}** pe koi password nahi tha.",
-            parse_mode="Markdown"
-        )
-
+        return await message.answer(f"⚠️ **{album['name']}** pe koi password nahi tha.", parse_mode="Markdown")
     await albums_col.update_one(
         {"_id": album["_id"]},
         {"$unset": {"password": ""}, "$set": {"updated_at": now_db()}}
@@ -2030,7 +2094,7 @@ async def cmd_removepass(message: types.Message):
 
 
 # ============================================================
-# ★ FIX: PASSWORD HANDLER — correctly calls view/zip with bypass flag
+# TEXT & PASSWORD HANDLER
 # ============================================================
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_and_password(message: types.Message):
@@ -2059,7 +2123,6 @@ async def handle_text_and_password(message: types.Message):
     album   = pending["album"]
     action  = pending["action"]
 
-    # Fresh album fetch karo database se
     fresh = await albums_col.find_one({"_id": album["_id"]})
     if not fresh:
         del password_pending[uid]
@@ -2071,15 +2134,11 @@ async def handle_text_and_password(message: types.Message):
     if entered != correct:
         return await message.answer("❌ Wrong password! Dobara try karein:")
 
-    # ★ FIX: Password pending delete karo PEHLE function call se
     del password_pending[uid]
 
     if action == "view":
-        # ★ FIX: message.text set karo aur _password_ok=True pass karo
-        # Yeh ensure karta hai ki password check dobara na ho
         message.text = f"/view {fresh['album_id']}"
         await view_by_id(message, _password_ok=True)
-
     elif action == "zip":
         message.text = f"/zip {fresh['album_id']}"
         await cmd_zip(message, _password_ok=True)
@@ -2095,7 +2154,8 @@ async def cmd_cancel(message: types.Message):
         session = user_sessions[uid]
         del user_sessions[uid]
         await message.answer(
-            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n_{len(session.get('photos', []))} unsaved items discard ho gaye._",
+            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n"
+            f"_{len(session.get('photos', []))} unsaved items discard ho gaye._",
             parse_mode="Markdown"
         )
     else:
@@ -2142,30 +2202,39 @@ async def cmd_grant(message: types.Message):
         except: pass
         await db.granted_users.update_one(
             {"user_id": uid},
-            {"$set": {"user_id": uid, "username": fetched_username, "full_name": fetched_fullname, "granted_at": now_db(), "granted_by": message.from_user.id}},
+            {"$set": {"user_id": uid, "username": fetched_username, "full_name": fetched_fullname,
+                      "granted_at": now_db(), "granted_by": message.from_user.id}},
             upsert=True
         )
         uname_str = f"@{fetched_username}" if fetched_username else f"ID: {uid}"
         await message.answer(f"✅ Access Granted!\n👤 {uname_str}\n🆔 {uid}")
         ok = await send_greeting(uid)
-        if not ok: await message.answer("⚠️ User ko greeting nahi gayi — user ne pehle /start kiya ho.")
+        if not ok: await message.answer("⚠️ User ko greeting nahi gayi.")
     elif target.startswith("@"):
         username = target.lstrip("@").lower()
         doc = await db.granted_users.find_one({"username": username})
         if doc and doc.get("user_id"):
             uid = doc["user_id"]
             granted_users.add(uid)
-            await db.granted_users.update_one({"user_id": uid}, {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}}, upsert=True)
+            await db.granted_users.update_one(
+                {"user_id": uid},
+                {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}},
+                upsert=True
+            )
             await message.answer(f"✅ **Access Granted!**\n👤 @{username} | 🆔 `{uid}`", parse_mode="Markdown")
             ok = await send_greeting(uid, username)
             if not ok: await message.answer("⚠️ User ko greeting nahi gayi.", parse_mode="Markdown")
         else:
             await db.granted_users.update_one(
                 {"username": username},
-                {"$set": {"username": username, "user_id": None, "granted_at": now_db(), "granted_by": message.from_user.id, "pending": True}},
+                {"$set": {"username": username, "user_id": None, "granted_at": now_db(),
+                          "granted_by": message.from_user.id, "pending": True}},
                 upsert=True
             )
-            await message.answer(f"⏳ **Pending Grant!**\n👤 @{username}\nJab pehli baar /start karenge, activate ho jayega.\n💡 User ID zyada reliable hai.", parse_mode="Markdown")
+            await message.answer(
+                f"⏳ **Pending Grant!**\n👤 @{username}\nJab /start karenge, activate hoga.",
+                parse_mode="Markdown"
+            )
     else:
         await message.answer("❌ Valid User ID ya @username dein.", parse_mode="Markdown")
 
@@ -2189,7 +2258,8 @@ async def cmd_denied(message: types.Message):
                 upsert=True
             )
             await message.answer(f"🚫 Access removed!\n🆔 `{uid}`", parse_mode="Markdown")
-        else: await message.answer(f"⚠️ `{uid}` list mein nahi tha.", parse_mode="Markdown")
+        else:
+            await message.answer(f"⚠️ `{uid}` list mein nahi tha.", parse_mode="Markdown")
     elif target.startswith("@"):
         username = target.lstrip("@").lower()
         doc = await db.granted_users.find_one({"username": username})
@@ -2203,8 +2273,10 @@ async def cmd_denied(message: types.Message):
                 upsert=True
             )
             await message.answer(f"🚫 @{username} access removed!", parse_mode="Markdown")
-        else: await message.answer(f"⚠️ @{username} list mein nahi tha.", parse_mode="Markdown")
-    else: await message.answer("❌ Valid ID ya @username dein.", parse_mode="Markdown")
+        else:
+            await message.answer(f"⚠️ @{username} list mein nahi tha.", parse_mode="Markdown")
+    else:
+        await message.answer("❌ Valid ID ya @username dein.", parse_mode="Markdown")
 
 
 @dp.message(Command("idinfo"))
@@ -2221,12 +2293,11 @@ async def cmd_idinfo(message: types.Message):
             uid_val  = u.get("user_id")
             uname    = u.get("username")
             fullname = u.get("full_name", "")
-            date = safe_ist(u.get("granted_at", now_db()))
-            albums = await albums_col.find({"created_by": uid_val}).sort("created_at", -1).to_list(50)
+            date     = safe_ist(u.get("granted_at", now_db()))
+            albums   = await albums_col.find({"created_by": uid_val}).sort("created_at", -1).to_list(50)
             if fullname: text += f"📛 {fullname}\n"
             if uname:    text += f"👤 @{uname}\n"
-            text += f"🆔 `{uid_val}`\n"
-            text += f"📅 Granted: {date}\n"
+            text += f"🆔 `{uid_val}`\n📅 Granted: {date}\n"
             if albums:
                 text += f"📁 Albums ({len(albums)}):\n"
                 for alb in albums:
@@ -2282,11 +2353,9 @@ async def cmd_idinfo(message: types.Message):
     albums = await albums_col.find({"created_by": target_uid}).sort("created_at", -1).to_list(50)
 
     text = "👤 *User Info*\n━━━━━━━━━━━━━━━━━━\n"
-    if tg_name:    text += f"📛 {md(tg_name)}\n"
+    if tg_name:     text += f"📛 {md(tg_name)}\n"
     if tg_username: text += f"🔗 @{tg_username}\n"
-    text += f"🆔 `{target_uid}`\n"
-    text += f"📊 Status: {status}\n"
-
+    text += f"🆔 `{target_uid}`\n📊 Status: {status}\n"
     if granted_doc:
         text += f"📅 Granted: {safe_ist(granted_doc.get('granted_at', now_db()))}\n"
     elif denied_doc:
@@ -2314,7 +2383,10 @@ async def cmd_idinfo(message: types.Message):
 async def cmd_id(message: types.Message):
     user = message.from_user
     uname = f"@{user.username}" if user.username else "N/A"
-    await message.answer(f"👤 **Your Info:**\n🆔 User ID: `{user.id}`\n📛 Name: {user.full_name}\n🔗 Username: {uname}", parse_mode="Markdown")
+    await message.answer(
+        f"👤 **Your Info:**\n🆔 User ID: `{user.id}`\n📛 Name: {user.full_name}\n🔗 Username: {uname}",
+        parse_mode="Markdown"
+    )
 
 
 # ============================================================
@@ -2374,7 +2446,9 @@ async def main():
         await db.reg_codes.create_index([("user_id", 1)], unique=True)
         await db.reg_codes.create_index([("code", 1)], unique=True)
         await db.denied_users.create_index([("user_id", 1)], unique=True)
-        granted_docs = await db.granted_users.find({"user_id": {"$ne": None}, "pending": {"$ne": True}}).to_list(500)
+        granted_docs = await db.granted_users.find(
+            {"user_id": {"$ne": None}, "pending": {"$ne": True}}
+        ).to_list(500)
         for doc in granted_docs:
             if doc.get("user_id"): granted_users.add(doc["user_id"])
         logger.info(f"✅ {len(granted_users)} granted users loaded!")

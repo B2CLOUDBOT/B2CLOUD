@@ -41,20 +41,19 @@ albums_col = db.albums
 b2_history_col = db.b2_history
 
 user_sessions = {}
-view_sessions = {}     # uid -> True  (jab /view chal raha ho toh)
-password_pending = {}  # uid -> {"action": "view"/"zip", "album_id": ..., "album": ...}
+view_sessions = {}
+password_pending = {}
 granted_users: set = set()
 
 # ── Registration code generator ──────────────────────────────
 async def get_or_create_reg_code(uid: int) -> str:
-    """Har user ka permanent unique registration code."""
     existing = await db.reg_codes.find_one({"user_id": uid})
     if existing:
         return existing["code"]
     count = await db.reg_codes.count_documents({})
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     digits  = "123456789"
-    total   = len(letters) * len(digits)  # 234
+    total   = len(letters) * len(digits)
     if count < total:
         l = letters[count // len(digits)]
         d = digits[count % len(digits)]
@@ -152,21 +151,16 @@ def count_media(files):
         if t == "video": videos += 1
         elif t == "document": docs += 1
         elif t in ("audio", "voice"): audios += 1
-        elif t == "text": pass  # text items count nahi hote media mein
+        elif t == "text": pass
         else: photos += 1
     return photos, videos, docs, audios
 
-# ============================================================
-# CHANGE 1: send_to_storage — text type support add kiya
-# ============================================================
 async def send_to_storage(fid: str, mtype: str, text_content: str = ""):
     for attempt in range(5):
         try:
-            # ── NEW: text type ──
             if mtype == "text":
                 msg = await bot.send_message(STORAGE_CHANNEL, text_content)
                 return msg.message_id, 0
-            # ── END NEW ──
             elif mtype == "video":
                 msg = await bot.send_video(STORAGE_CHANNEL, fid)
                 fsize = msg.video.file_size if msg.video else 0
@@ -268,17 +262,7 @@ async def update_checklist():
         logger.warning(f"Checklist update failed: {e}")
 
 
-# ============================================================
-# CHANGE 2: save_items loop helper — text items handle karta hai
-# ── Yeh helper function sabhi save loops mein use hoga ──────
-# ============================================================
 async def process_and_save_items(session_photos: list) -> list:
-    """
-    Session ke photos list ko iterate karo.
-    Text items ko send_to_storage("text") se bhejo.
-    Media items ko normal send_to_storage se bhejo.
-    Saved items list return karo.
-    """
     saved_items = []
     for item in session_photos:
         fid   = item["file_id"] if isinstance(item, dict) else item
@@ -521,7 +505,6 @@ async def quick_close(callback: types.CallbackQuery):
         types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
     )
-    # Pehla non-text item dhundo preview ke liye
     first = next((i for i in session["photos"] if isinstance(i, dict) and i.get("type") != "text"), session["photos"][0])
     fid = first["file_id"] if isinstance(first, dict) else first
     mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
@@ -561,7 +544,6 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         add_msg_id3 = add_msg3.message_id
     except: pass
 
-    # CHANGE 3: process_and_save_items use karo (text support included)
     saved_items = await process_and_save_items(session["photos"])
 
     await albums_col.update_one(
@@ -632,7 +614,6 @@ async def warn_save_first(callback: types.CallbackQuery):
 async def cmd_close(message: types.Message):
     uid = message.from_user.id
 
-    # ── Case 1: "add" session ────────────────────────────────
     if uid in user_sessions and user_sessions[uid]["mode"] == "add":
         session = user_sessions[uid]
         if not session["photos"]:
@@ -655,7 +636,6 @@ async def cmd_close(message: types.Message):
                 add_msg_id = add_msg.message_id
             except: pass
 
-            # CHANGE 3: process_and_save_items use karo
             total_new = len(session["photos"])
             saved_items = []
             for idx, item in enumerate(session["photos"], 1):
@@ -718,12 +698,10 @@ async def cmd_close(message: types.Message):
         del user_sessions[uid]
         return
 
-    # ── Case 2: View session ─────────────────────────────────
     if uid in view_sessions:
         view_sessions[uid] = False
         return await message.answer("⏹ View band kar diya!")
 
-    # ── Case 3: "create" session ─────────────────────────────
     if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
         return await message.answer("⚠️ Koi active session nahi hai.")
     logger.info(f"cmd_close called by {uid}, session photos: {len(user_sessions[uid].get('photos', []))}")
@@ -749,7 +727,6 @@ async def cmd_close(message: types.Message):
         types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
         types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
     )
-    # Pehla non-text item dhundo preview ke liye
     first = next((i for i in session["photos"] if isinstance(i, dict) and i.get("type") != "text"), session["photos"][0])
     fid = first["file_id"] if isinstance(first, dict) else first
     mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
@@ -812,7 +789,6 @@ async def process_confirm(callback: types.CallbackQuery):
             created_msg_id = created_msg.message_id
         except: pass
 
-        # CHANGE 3: text items ke saath save karo
         saved_items = []
         total_files = len(session["photos"])
         for idx, item in enumerate(session["photos"], 1):
@@ -974,7 +950,6 @@ async def save_add(message: types.Message):
             add_msg_id2 = add_msg2.message_id
         except: pass
 
-        # CHANGE 3: process_and_save_items use karo
         saved_items = await process_and_save_items(session["photos"])
 
         await albums_col.update_one(
@@ -1460,7 +1435,7 @@ async def cmd_info(message: types.Message):
 
 
 # ============================================================
-# /view
+# /view  — internal helper with password_bypass flag
 # ============================================================
 @dp.message(F.text.regexp(r"^/view_[A-Za-z0-9\-]+$"))
 async def view_shortcut(message: types.Message):
@@ -1469,7 +1444,7 @@ async def view_shortcut(message: types.Message):
     await view_by_id(message)
 
 @dp.message(Command("view"))
-async def view_by_id(message: types.Message):
+async def view_by_id(message: types.Message, _password_ok: bool = False):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -1503,8 +1478,10 @@ async def view_by_id(message: types.Message):
         return await message.answer(f"❌ Album '{identifier}' nahi mila.")
 
     uid = message.from_user.id
+
+    # ── FIX: Password check sirf tab karo jab _password_ok=False ho ──
     album_pass = album.get("password")
-    if album_pass and not is_owner(uid):
+    if album_pass and not is_owner(uid) and not _password_ok:
         password_pending[uid] = {"action": "view", "album": album}
         return await message.answer(
             f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:",
@@ -1534,7 +1511,6 @@ async def view_by_id(message: types.Message):
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
         channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
         try:
-            # CHANGE 4: text type view mein support
             if mtype == "text":
                 text_val = item.get("text", "") if isinstance(item, dict) else ""
                 await bot.send_message(message.chat.id, text_val)
@@ -1555,7 +1531,7 @@ async def view_by_id(message: types.Message):
 
 
 # ============================================================
-# /zip  —  Smart Export
+# /zip  —  Smart Export  ★ FIXED ★
 # ============================================================
 @dp.message(F.text.regexp(r"^/zip_[A-Za-z0-9\-]+$"))
 async def zip_shortcut(message: types.Message):
@@ -1564,7 +1540,7 @@ async def zip_shortcut(message: types.Message):
     await cmd_zip(message)
 
 @dp.message(Command("zip"))
-async def cmd_zip(message: types.Message):
+async def cmd_zip(message: types.Message, _password_ok: bool = False):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
 
@@ -1577,8 +1553,10 @@ async def cmd_zip(message: types.Message):
         return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
 
     zip_uid = message.from_user.id
+
+    # ── FIX: Password check sirf tab karo jab _password_ok=False ho ──
     album_pass = album.get("password")
-    if album_pass and not is_owner(zip_uid):
+    if album_pass and not is_owner(zip_uid) and not _password_ok:
         password_pending[zip_uid] = {"action": "zip", "album": album}
         return await message.answer(
             f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:",
@@ -1589,8 +1567,15 @@ async def cmd_zip(message: types.Message):
     if not files:
         return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
 
+    # ── ZIP config ──────────────────────────────────────────
+    # Bot download limit: 20MB per file (Telegram Bot API restriction)
     DOWNLOAD_LIMIT = 20 * 1024 * 1024
-    SPLIT_SIZE     = 45 * 1024 * 1024
+    # ★ FIX: Split size 1.5GB — ek part itna bada nahi banega
+    # ki Telegram reject kare (Bot API limit 50MB document send)
+    # Lekin download karke ZIP banana memory-bound hai isliye
+    # hum ZIP send karte hain jo max 45MB ka hoga
+    SPLIT_SIZE = 45 * 1024 * 1024  # 45MB per ZIP part (Telegram safe limit)
+
     EXT_MAP = {"photo": "jpg", "video": "mp4", "document": "bin", "audio": "mp3", "voice": "ogg"}
 
     status_msg = await message.answer(
@@ -1601,7 +1586,7 @@ async def cmd_zip(message: types.Message):
 
     small_files = []
     large_files = []
-    text_items  = []  # text items alag collect karo
+    text_items  = []
     check_failed = 0
 
     for idx, item in enumerate(files, 1):
@@ -1610,7 +1595,6 @@ async def cmd_zip(message: types.Message):
         fname          = item.get("name",  "")      if isinstance(item, dict) else ""
         channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
 
-        # Text items ko alag list mein daalo
         if mtype == "text":
             text_val = item.get("text", "") if isinstance(item, dict) else ""
             text_items.append((idx, text_val))
@@ -1640,7 +1624,7 @@ async def cmd_zip(message: types.Message):
     try:
         await status_msg.edit_text(
             f"📊 **{album['name']}**\n"
-            f"📦 ZIP (<20 MB): {len(small_files)} files\n"
+            f"📦 ZIP (<20 MB each): {len(small_files)} files\n"
             f"📤 Direct forward (≥20 MB): {len(large_files)} files\n"
             f"📝 Text items: {len(text_items)}\n"
             f"{'⚠️ Unreachable: ' + str(check_failed) + ' files' + chr(10) if check_failed else ''}"
@@ -1654,7 +1638,7 @@ async def cmd_zip(message: types.Message):
     forwarded      = 0
     fwd_failed     = 0
 
-    # Text items pehle bhejo
+    # ── Text items pehle send karo ──────────────────────────
     if text_items:
         for t_idx, t_val in text_items:
             try:
@@ -1662,6 +1646,7 @@ async def cmd_zip(message: types.Message):
             except: pass
             await asyncio.sleep(0.2)
 
+    # ── Small files: download → ZIP → send ──────────────────
     if small_files:
         try:
             await status_msg.edit_text(
@@ -1672,28 +1657,34 @@ async def cmd_zip(message: types.Message):
 
         downloaded = []
 
-        for idx, (fid, mtype, fname, tg_file) in enumerate(small_files, 1):
-            try:
-                url = f"https://api.telegram.org/file/bot{API_TOKEN}/{tg_file.file_path}"
-                async with aiohttp.ClientSession() as sess:
+        async with aiohttp.ClientSession() as sess:
+            for idx, (fid, mtype, fname, tg_file) in enumerate(small_files, 1):
+                try:
+                    url = f"https://api.telegram.org/file/bot{API_TOKEN}/{tg_file.file_path}"
                     async with sess.get(url) as resp:
                         if resp.status == 200:
                             data = await resp.read()
-                            ext = (tg_file.file_path.rsplit(".", 1)[-1]
-                                   if "." in tg_file.file_path
-                                   else EXT_MAP.get(mtype, "bin"))
-                            safe_name = fname if fname else f"{idx:04d}_{mtype}.{ext}"
+                            # ★ FIX: extension properly determine karo
+                            if fname and "." in fname:
+                                safe_name = fname
+                            else:
+                                ext = (
+                                    tg_file.file_path.rsplit(".", 1)[-1]
+                                    if tg_file.file_path and "." in tg_file.file_path
+                                    else EXT_MAP.get(mtype, "bin")
+                                )
+                                safe_name = fname if fname else f"{idx:04d}_{mtype}.{ext}"
                             downloaded.append((safe_name, data))
-            except Exception as e:
-                logger.error(f"Download error idx {idx}: {e}")
+                except Exception as e:
+                    logger.error(f"Download error idx {idx}: {e}")
 
-            if idx % 10 == 0:
-                try:
-                    await status_msg.edit_text(
-                        f"⏬ Downloading... {idx}/{len(small_files)}\n📁 **{album['name']}**",
-                        parse_mode="Markdown"
-                    )
-                except: pass
+                if idx % 10 == 0:
+                    try:
+                        await status_msg.edit_text(
+                            f"⏬ Downloading... {idx}/{len(small_files)}\n📁 **{album['name']}**",
+                            parse_mode="Markdown"
+                        )
+                    except: pass
 
         if downloaded:
             try:
@@ -1704,36 +1695,41 @@ async def cmd_zip(message: types.Message):
             except: pass
 
             zip_name = re.sub(r'[^\w\s\-]', '', album["name"]).strip().replace(' ', '_') or "album"
-            parts     = []
-            cur_buf   = io.BytesIO()
-            cur_zf    = zipfile.ZipFile(cur_buf, mode='w', compression=zipfile.ZIP_DEFLATED)
-            cur_size  = 0
-            cur_count = 0
+
+            # ★ FIX: ZIP parts properly banana — har part alag buffer mein
+            parts = []          # list of (bytes_data, file_count)
+            cur_files  = []     # [(safe_name, data), ...]
+            cur_size   = 0
 
             for safe_name, data in downloaded:
-                if cur_size + len(data) > SPLIT_SIZE and cur_count > 0:
-                    cur_zf.close()
-                    cur_buf.seek(0)
-                    parts.append((cur_buf, cur_count))
-                    cur_buf   = io.BytesIO()
-                    cur_zf    = zipfile.ZipFile(cur_buf, mode='w', compression=zipfile.ZIP_DEFLATED)
+                # Agar current part mein add karne se SPLIT_SIZE exceed ho
+                # aur already kuch files hain, toh pehle current part close karo
+                if cur_size + len(data) > SPLIT_SIZE and cur_files:
+                    # ★ FIX: ZipFile properly close karo aur bytes nikaalo
+                    zip_buf = io.BytesIO()
+                    with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+                        for n, d in cur_files:
+                            zf.writestr(n, d)
+                    parts.append((zip_buf.getvalue(), len(cur_files)))
+                    cur_files = []
                     cur_size  = 0
-                    cur_count = 0
 
-                cur_zf.writestr(safe_name, data)
-                cur_size  += len(data)
-                cur_count += 1
+                cur_files.append((safe_name, data))
+                cur_size += len(data)
 
-            if cur_count > 0:
-                cur_zf.close()
-                cur_buf.seek(0)
-                parts.append((cur_buf, cur_count))
+            # Last part
+            if cur_files:
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+                    for n, d in cur_files:
+                        zf.writestr(n, d)
+                parts.append((zip_buf.getvalue(), len(cur_files)))
 
             total_parts = len(parts)
 
-            for part_num, (zip_buf, file_count) in enumerate(parts, 1):
+            for part_num, (zip_bytes, file_count) in enumerate(parts, 1):
                 part_fname = (
-                    f"{zip_name}_part{part_num}.zip" if total_parts > 1
+                    f"{zip_name}_part{part_num}of{total_parts}.zip" if total_parts > 1
                     else f"{zip_name}.zip"
                 )
                 part_label = f" (Part {part_num}/{total_parts})" if total_parts > 1 else ""
@@ -1741,15 +1737,16 @@ async def cmd_zip(message: types.Message):
                 try:
                     await bot.send_document(
                         message.chat.id,
-                        document=types.BufferedInputFile(zip_buf.read(), filename=part_fname),
-                        caption=f"📦 {part_fname}{part_label}\n🗂 {file_count} files | Saved"
+                        document=types.BufferedInputFile(zip_bytes, filename=part_fname),
+                        caption=f"📦 {part_fname}{part_label}\n🗂 {file_count} files | 📁 {album['name']}"
                     )
                     zip_parts_sent += 1
                     total_zipped   += file_count
                 except Exception as e:
                     logger.error(f"ZIP send error part {part_num}: {e}")
-                    await message.answer(f"ZIP Part {part_num} send nahi hua: {e}")
+                    await message.answer(f"❌ ZIP Part {part_num} send nahi hua: {e}")
 
+    # ── Large files: direct forward ─────────────────────────
     if large_files:
         await message.answer(
             f"📤 **{len(large_files)} badi file(s)** direct bhej raha hoon (≥20 MB)...",
@@ -1775,6 +1772,7 @@ async def cmd_zip(message: types.Message):
                 fwd_failed += 1
             await asyncio.sleep(0.4)
 
+    # ── Final summary ────────────────────────────────────────
     final = f"✅ **Done! — {album['name']}**\n\n"
     if text_items:
         final += f"📝 Text items: {len(text_items)} bheje\n"
@@ -1789,7 +1787,10 @@ async def cmd_zip(message: types.Message):
     if zip_parts_sent == 0 and forwarded == 0 and not text_items:
         final = "❌ Koi bhi file process nahi ho saki."
 
-    await status_msg.edit_text(final, parse_mode="Markdown")
+    try:
+        await status_msg.edit_text(final, parse_mode="Markdown")
+    except:
+        await message.answer(final, parse_mode="Markdown")
 
 
 # ============================================================
@@ -2029,13 +2030,13 @@ async def cmd_removepass(message: types.Message):
 
 
 # ============================================================
-# CHANGE 4: PASSWORD INPUT HANDLER — text/session support
+# ★ FIX: PASSWORD HANDLER — correctly calls view/zip with bypass flag
 # ============================================================
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_and_password(message: types.Message):
     uid = message.from_user.id
 
-    # ── NEW: Active session mein text save karo ──────────────
+    # Active session mein text save karo
     if uid in user_sessions:
         session = user_sessions[uid]
         if session.get("mode") in ("create", "add"):
@@ -2049,35 +2050,39 @@ async def handle_text_and_password(message: types.Message):
                 })
                 await message.reply("📝 Text saved!")
             return
-    # ── END NEW ──────────────────────────────────────────────
 
-    # ── Password handler (original logic) ───────────────────
-    if uid not in password_pending: return
+    # Password handler
+    if uid not in password_pending:
+        return
 
     pending = password_pending[uid]
     album   = pending["album"]
     action  = pending["action"]
 
+    # Fresh album fetch karo database se
     fresh = await albums_col.find_one({"_id": album["_id"]})
     if not fresh:
         del password_pending[uid]
         return
 
-    entered  = message.text.strip()
-    correct  = fresh.get("password", "")
+    entered = message.text.strip()
+    correct = fresh.get("password", "")
 
     if entered != correct:
         return await message.answer("❌ Wrong password! Dobara try karein:")
 
+    # ★ FIX: Password pending delete karo PEHLE function call se
     del password_pending[uid]
 
     if action == "view":
+        # ★ FIX: message.text set karo aur _password_ok=True pass karo
+        # Yeh ensure karta hai ki password check dobara na ho
         message.text = f"/view {fresh['album_id']}"
-        await view_by_id(message)
+        await view_by_id(message, _password_ok=True)
 
     elif action == "zip":
         message.text = f"/zip {fresh['album_id']}"
-        await cmd_zip(message)
+        await cmd_zip(message, _password_ok=True)
 
 
 # ============================================================
@@ -2373,7 +2378,7 @@ async def main():
         for doc in granted_docs:
             if doc.get("user_id"): granted_users.add(doc["user_id"])
         logger.info(f"✅ {len(granted_users)} granted users loaded!")
-        logger.info("✅ Bot polling started!") 
+        logger.info("✅ Bot polling started!")
         await start_server()
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except Exception as e:

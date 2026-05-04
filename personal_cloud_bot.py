@@ -2276,37 +2276,41 @@ async def cmd_makelist(message: types.Message):
                 pass
 
             return await message.answer(
-                f"✅ Checklist update ho gaya!\n📌 Same message update hua\n🆔 `{msg_id}`",
+                f"✅ Checklist same message me update ho gaya!\n🆔 `{msg_id}`",
                 parse_mode="Markdown"
             )
 
         except Exception as e:
-            logger.warning(f"Old checklist edit failed, creating new one: {e}")
+            return await message.answer(
+                f"❌ Old checklist edit nahi hua.\n"
+                f"Old Message ID: `{msg_id}`\n\n"
+                f"Reason: `{e}`\n\n"
+                f"New checklist create nahi kiya, taki spam na ho.",
+                parse_mode="Markdown"
+            )
+
+    sent = await bot.send_message(
+        STORAGE_CHANNEL,
+        checklist_text,
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
 
     try:
-        sent = await bot.send_message(
-            STORAGE_CHANNEL,
-            checklist_text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
         await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+    except:
+        pass
 
-        await db.settings.update_one(
-            {"key": "checklist_msg_id"},
-            {"$set": {"key": "checklist_msg_id", "value": sent.message_id}},
-            upsert=True
-        )
+    await db.settings.update_one(
+        {"key": "checklist_msg_id"},
+        {"$set": {"key": "checklist_msg_id", "value": sent.message_id}},
+        upsert=True
+    )
 
-        await message.answer(
-            f"✅ Checklist create ho gaya!\n📌 Pinned\n🏷️ Title: **{title}**\n🆔 `{sent.message_id}`",
-            parse_mode="Markdown"
-        )
-
-    except Exception as e:
-        logger.error(f"makelist error: {e}")
-        await message.answer(f"❌ Error: {e}")
-
+    await message.answer(
+        f"✅ Checklist create ho gaya!\n📌 Pinned\n🆔 `{sent.message_id}`",
+        parse_mode="Markdown"
+    )
 
 # ============================================================
 # /setpass  &  /removepass

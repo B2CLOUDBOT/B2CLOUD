@@ -188,6 +188,18 @@ def file_signature(item: dict) -> str:
     return f"{mtype}|{name}|{size}|{fid[:30]}|{text}"
 
 
+def sort_session_items(items: list) -> list:
+    """Original chat message order preserve karta hai.
+    Photo/video handler kabhi text ke baad process hota hai, isliye save se pehle
+    Telegram message_id/order ke हिसाब se sort karna zaroori hai.
+    """
+    def key(x):
+        if isinstance(x, dict):
+            return int(x.get("order") or x.get("message_id") or x.get("seq") or 0)
+        return 0
+    return sorted(items, key=key)
+
+
 async def cleanup_expired_session(uid: int) -> bool:
     if uid not in user_sessions:
         return False
@@ -350,7 +362,8 @@ async def update_checklist():
 
 async def process_and_save_items(session_photos: list) -> list:
     saved_items = []
-    for item in session_photos:
+    # Always save in original user-message sequence
+    for item in sort_session_items(session_photos):
         fid   = item["file_id"] if isinstance(item, dict) else item
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
 
@@ -538,7 +551,15 @@ async def _handle_media(message: types.Message, file_id: str, unique_id: str, me
     session = user_sessions[uid]
     if unique_id in session["ids"]:
         return await message.reply(f"🚫 Duplicate {media_type}! Skip kar diya.")
-    item = {"file_id": file_id, "type": media_type, "name": fname, "file_size": file_size}
+    item = {
+        "file_id": file_id,
+        "type": media_type,
+        "name": fname,
+        "file_size": file_size,
+        "message_id": message.message_id,
+        "order": message.message_id,
+        "seq": len(session.get("photos", [])) + 1,
+    }
     item["sig"] = file_signature(item)
     session["photos"].append(item)
     session["ids"].add(unique_id)
@@ -735,7 +756,7 @@ async def cmd_close(message: types.Message):
 
             total_new = len(session["photos"])
             saved_items = []
-            for idx, item in enumerate(session["photos"], 1):
+            for idx, item in enumerate(sort_session_items(session["photos"]), 1):
                 fid   = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 if mtype == "text":
@@ -887,7 +908,7 @@ async def process_confirm(callback: types.CallbackQuery):
 
         saved_items = []
         total_files = len(session["photos"])
-        for idx, item in enumerate(session["photos"], 1):
+        for idx, item in enumerate(sort_session_items(session["photos"]), 1):
             fid   = item["file_id"] if isinstance(item, dict) else item
             mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
             if mtype == "text":
@@ -2207,9 +2228,12 @@ async def handle_text_and_password(message: types.Message):
                     "type": "text",
                     "text": text_content,
                     "file_id": "",
-                    "name": ""
+                    "name": "",
+                    "message_id": message.message_id,
+                    "order": message.message_id,
+                    "seq": len(session.get("photos", [])) + 1,
                 })
-                await message.reply("📝 Text saved!")
+                # Silent save: user ko "Text saved!" spam nahi bhejna
             return
 
     # Password handler

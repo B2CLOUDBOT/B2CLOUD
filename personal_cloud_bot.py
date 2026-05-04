@@ -5,7 +5,8 @@ import zipfile
 import aiohttp
 import os
 import re
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -44,6 +45,11 @@ user_sessions = {}
 view_sessions = {}
 password_pending = {}
 granted_users: set = set()
+
+# FREE EXTRA FEATURES SETTINGS
+rate_cache = defaultdict(list)
+MAX_UPLOAD_PER_MIN = int(os.environ.get("MAX_UPLOAD_PER_MIN", "30"))
+SESSION_TIMEOUT_MIN = int(os.environ.get("SESSION_TIMEOUT_MIN", "60"))
 
 # ── Registration code generator ──────────────────────────────
 async def get_or_create_reg_code(uid: int) -> str:
@@ -154,6 +160,86 @@ def count_media(files):
         elif t == "text": pass
         else: photos += 1
     return photos, videos, docs, audios
+
+
+# ============================================================
+# FREE EXTRA HELPERS
+# ============================================================
+def human_size(num: int) -> str:
+    try:
+        num = float(num or 0)
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if num < 1024:
+                return f"{num:.1f} {unit}"
+            num /= 1024
+        return f"{num:.1f} PB"
+    except Exception:
+        return "0 B"
+
+
+def file_signature(item: dict) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    name = (item.get("name") or "").lower().strip()
+    size = int(item.get("file_size") or 0)
+    mtype = item.get("type", "")
+    fid = item.get("file_id", "")
+    text = (item.get("text") or "")[:80]
+    return f"{mtype}|{name}|{size}|{fid[:30]}|{text}"
+
+
+async def cleanup_expired_session(uid: int) -> bool:
+    if uid not in user_sessions:
+        return False
+    session = user_sessions[uid]
+    started = session.get("started_at")
+    if started and (now_db() - started).total_seconds() > SESSION_TIMEOUT_MIN * 60:
+        del user_sessions[uid]
+        return True
+    return False
+
+
+def check_rate_limit(uid: int) -> bool:
+    now_ts = datetime.now().timestamp()
+    rate_cache[uid] = [t for t in rate_cache[uid] if now_ts - t < 60]
+    if len(rate_cache[uid]) >= MAX_UPLOAD_PER_MIN:
+        return False
+    rate_cache[uid].append(now_ts)
+    return True
+
+
+async def get_total_storage_bytes() -> int:
+    total = 0
+    async for alb in albums_col.find({}, {"photos.file_size": 1}):
+        for f in alb.get("photos", []):
+            if isinstance(f, dict):
+                total += int(f.get("file_size", 0) or 0)
+    return total
+
+
+async def storage_limit_ok(extra_bytes: int = 0) -> tuple[bool, str]:
+    setting = await db.settings.find_one({"key": "storage_limit_mb"})
+    limit_mb = int(setting.get("value", 0)) if setting else 0
+    if limit_mb <= 0:
+        return True, ""
+    used = await get_total_storage_bytes()
+    limit_bytes = limit_mb * 1024 * 1024
+    if used + int(extra_bytes or 0) > limit_bytes:
+        return False, f"🚫 Storage limit full hai. Used: {human_size(used)} / Limit: {human_size(limit_bytes)}"
+    return True, ""
+
+
+async def notify_album_update(album_id: str, text: str):
+    album = await albums_col.find_one({"album_id": album_id})
+    if not album:
+        return
+    subs = album.get("subscribers", [])
+    for uid in subs:
+        try:
+            await bot.send_message(uid, text, parse_mode="Markdown")
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
 
 async def send_to_storage(fid: str, mtype: str, text_content: str = ""):
     for attempt in range(5):
@@ -272,6 +358,7 @@ async def process_and_save_items(session_photos: list) -> list:
             text_val = item.get("text", "")
             mid, _ = await send_to_storage("", "text", text_val)
             new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
+            new_item["sig"] = file_signature(new_item)
             if mid: new_item["storage_msg_id"] = mid
             saved_items.append(new_item)
         else:
@@ -279,6 +366,7 @@ async def process_and_save_items(session_photos: list) -> list:
             new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
             if mid: new_item["storage_msg_id"] = mid
             if fsize: new_item["file_size"] = fsize
+            new_item["sig"] = file_signature(new_item)
             saved_items.append(new_item)
 
         await asyncio.sleep(0.2)
@@ -438,12 +526,21 @@ async def cmd_album(message: types.Message):
 # ============================================================
 async def _handle_media(message: types.Message, file_id: str, unique_id: str, media_type: str, fname: str = "", file_size: int = 0):
     uid = message.from_user.id
+    if await cleanup_expired_session(uid):
+        return await message.answer("⏰ Session timeout ho gaya. Dobara /album ya /add start karo.")
+    if not check_rate_limit(uid):
+        return await message.reply("🚫 Upload speed bahut fast hai. 1 minute baad try karo.")
+    ok, limit_msg = await storage_limit_ok(file_size)
+    if not ok:
+        return await message.reply(limit_msg)
     if uid not in user_sessions:
         return
     session = user_sessions[uid]
     if unique_id in session["ids"]:
         return await message.reply(f"🚫 Duplicate {media_type}! Skip kar diya.")
-    session["photos"].append({"file_id": file_id, "type": media_type, "name": fname, "file_size": file_size})
+    item = {"file_id": file_id, "type": media_type, "name": fname, "file_size": file_size}
+    item["sig"] = file_signature(item)
+    session["photos"].append(item)
     session["ids"].add(unique_id)
 
 @dp.message(F.photo)
@@ -2389,6 +2486,240 @@ async def cmd_id(message: types.Message):
     )
 
 
+
+# ============================================================
+# FREE EXTRA FEATURES - SEARCH / PIN / SORT / STATS / DUPES / LIMIT / NOTIFY
+# ============================================================
+@dp.message(Command("search"))
+async def cmd_search(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage:\n`/search maths`\n`/search pdf notes`\n`/search #physics`", parse_mode="Markdown")
+    q = args[1].strip().lower()
+    albums = await albums_col.find().sort("updated_at", -1).to_list(300)
+    results = []
+    for alb in albums:
+        name = (alb.get("name") or "").lower()
+        aid = (alb.get("album_id") or "").lower()
+        tags = " ".join(alb.get("tags", [])).lower()
+        score = 0
+        if q in name: score += 5
+        if q in aid: score += 5
+        if q in tags: score += 4
+        file_hits = []
+        for idx, f in enumerate(alb.get("photos", []), 1):
+            if not isinstance(f, dict):
+                continue
+            fname = (f.get("name") or "").lower()
+            ftype = (f.get("type") or "").lower()
+            text = (f.get("text") or "").lower()
+            if q in fname or q in ftype or q in text:
+                score += 2
+                display = f"#{idx} {f.get('type', '')} {f.get('name', '')}".strip()
+                file_hits.append(display)
+        if score > 0:
+            results.append((score, alb, file_hits[:3]))
+    results.sort(key=lambda x: x[0], reverse=True)
+    if not results:
+        return await message.answer(f"❌ `{md(q)}` se kuch nahi mila.", parse_mode="Markdown")
+    text = f"🔎 *Search Results:* `{md(q)}`\n━━━━━━━━━━━━━━━━━━\n\n"
+    for score, alb, hits in results[:15]:
+        lock = "🔒" if alb.get("locked") else "📁"
+        pin = "📌 " if alb.get("pinned") else ""
+        text += f"{pin}{lock} *{md(alb.get('name', 'Unnamed'))}*\n🆔 `{alb.get('album_id')}` | 🗂 {alb.get('count', 0)} files\n👁 `/view {alb.get('album_id')}`\n"
+        if hits:
+            text += "🎯 " + "\n🎯 ".join(md(h) for h in hits) + "\n"
+        text += "\n"
+    await message.answer(text.strip(), parse_mode="Markdown")
+
+
+@dp.message(Command("pin"))
+async def cmd_pin(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/pin <album name/id>`", parse_mode="Markdown")
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.")
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"pinned": True, "updated_at": now_db()}})
+    await message.answer(f"📌 Pinned: **{md(album['name'])}**", parse_mode="Markdown")
+
+
+@dp.message(Command("unpin"))
+async def cmd_unpin(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/unpin <album name/id>`", parse_mode="Markdown")
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.")
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"pinned": False, "updated_at": now_db()}})
+    await message.answer(f"📍 Unpinned: **{md(album['name'])}**", parse_mode="Markdown")
+
+
+@dp.message(Command("sort"))
+async def cmd_sort(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    args = message.text.split(maxsplit=1)
+    mode = args[1].strip().lower() if len(args) > 1 else "date"
+    albums = await albums_col.find().to_list(500)
+    def total_size(a):
+        return sum((f.get("file_size", 0) for f in a.get("photos", []) if isinstance(f, dict)))
+    if mode == "size":
+        albums.sort(key=total_size, reverse=True)
+    elif mode == "name":
+        albums.sort(key=lambda a: (a.get("name") or "").lower())
+    elif mode == "files":
+        albums.sort(key=lambda a: a.get("count", 0), reverse=True)
+    else:
+        mode = "date"
+        albums.sort(key=lambda a: a.get("updated_at", a.get("created_at", now_db())), reverse=True)
+    if not albums:
+        return await message.answer("📂 Koi album nahi hai.")
+    text = f"🗂 *Albums Sorted by:* `{mode}`\n━━━━━━━━━━━━━━━━━━\n\n"
+    for alb in albums[:30]:
+        pin = "📌 " if alb.get("pinned") else ""
+        lock = "🔒" if alb.get("locked") else "📁"
+        text += f"{pin}{lock} *{md(alb.get('name', 'Unnamed'))}*\n🆔 `{alb.get('album_id')}` | 🗂 {alb.get('count', 0)} | 💾 {human_size(total_size(alb))}\n👁 `/view {alb.get('album_id')}`\n\n"
+    await message.answer(text.strip(), parse_mode="Markdown")
+
+
+@dp.message(Command("stats2"))
+async def cmd_stats2(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    albums = await albums_col.find().to_list(1000)
+    total_albums = len(albums)
+    total_files = sum(a.get("count", 0) for a in albums)
+    locked = sum(1 for a in albums if a.get("locked"))
+    pinned = sum(1 for a in albums if a.get("pinned"))
+    total_size = 0
+    type_count = defaultdict(int)
+    for alb in albums:
+        for f in alb.get("photos", []):
+            if isinstance(f, dict):
+                total_size += int(f.get("file_size", 0) or 0)
+                type_count[f.get("type", "unknown")] += 1
+    biggest = sorted(albums, key=lambda a: sum((f.get("file_size", 0) for f in a.get("photos", []) if isinstance(f, dict))), reverse=True)[:5]
+    text = (
+        "📊 *Advanced Cloud Stats*\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📁 Albums: `{total_albums}`\n"
+        f"🗂 Files: `{total_files}`\n"
+        f"💾 Total Size: `{human_size(total_size)}`\n"
+        f"🔒 Locked: `{locked}`\n"
+        f"📌 Pinned: `{pinned}`\n\n"
+        "📦 *File Types*\n"
+    )
+    if type_count:
+        for k, v in type_count.items():
+            text += f"• {md(k)}: `{v}`\n"
+    else:
+        text += "• No files\n"
+    text += "\n🔥 *Top Biggest Albums*\n"
+    for alb in biggest:
+        size = sum((f.get("file_size", 0) for f in alb.get("photos", []) if isinstance(f, dict)))
+        text += f"• {md(alb.get('name', 'Unnamed'))} — `{human_size(size)}`\n"
+    await message.answer(text, parse_mode="Markdown")
+
+
+@dp.message(Command("recent"))
+async def cmd_recent(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    albums = await albums_col.find().sort("updated_at", -1).to_list(20)
+    if not albums:
+        return await message.answer("📂 Koi album nahi hai.")
+    text = "🕓 *Recently Updated Albums*\n━━━━━━━━━━━━━━━━━━\n\n"
+    for alb in albums:
+        dt = safe_ist(alb.get("updated_at", alb.get("created_at")))
+        text += f"📁 *{md(alb.get('name', 'Unnamed'))}*\n🆔 `{alb.get('album_id')}`\n🕐 {dt}\n👁 `/view {alb.get('album_id')}`\n\n"
+    await message.answer(text.strip(), parse_mode="Markdown")
+
+
+@dp.message(Command("dupes"))
+async def cmd_dupes(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    albums = await albums_col.find().to_list(1000)
+    seen = {}
+    dupes = []
+    for alb in albums:
+        for idx, f in enumerate(alb.get("photos", []), 1):
+            if not isinstance(f, dict):
+                continue
+            sig = f.get("sig") or file_signature(f)
+            if sig in seen:
+                dupes.append((seen[sig], alb.get("name"), alb.get("album_id"), idx))
+            else:
+                seen[sig] = (alb.get("name"), alb.get("album_id"), idx)
+    if not dupes:
+        return await message.answer("✅ Duplicate files nahi mile.")
+    text = "🧹 *Duplicate Checker*\n━━━━━━━━━━━━━━━━━━\n\n"
+    for old, name, aid, idx in dupes[:25]:
+        text += f"⚠️ Duplicate:\nOld: {md(old[0])} #{old[2]}\nNew: {md(name)} #{idx}\n🆔 `{aid}`\n\n"
+    if len(dupes) > 25:
+        text += f"Aur `{len(dupes)-25}` duplicates bhi hain.\n"
+    await message.answer(text.strip(), parse_mode="Markdown")
+
+
+@dp.message(Command("limit"))
+async def cmd_limit(message: types.Message):
+    if not is_owner(message.from_user.id):
+        return await message.answer("🚫 Sirf owner!")
+    args = message.text.split(maxsplit=1)
+    if len(args) == 1:
+        setting = await db.settings.find_one({"key": "storage_limit_mb"})
+        val = setting["value"] if setting else 0
+        used = await get_total_storage_bytes()
+        return await message.answer(f"📦 Current storage limit: `{val} MB`\n💾 Used: `{human_size(used)}`\n\nSet: `/limit 5000`\nOff: `/limit off`", parse_mode="Markdown")
+    val = args[1].strip().lower()
+    if val == "off":
+        await db.settings.update_one({"key": "storage_limit_mb"}, {"$set": {"key": "storage_limit_mb", "value": 0}}, upsert=True)
+        return await message.answer("✅ Storage limit OFF.")
+    try:
+        mb = int(val)
+    except Exception:
+        return await message.answer("❌ Usage: `/limit 5000`", parse_mode="Markdown")
+    await db.settings.update_one({"key": "storage_limit_mb"}, {"$set": {"key": "storage_limit_mb", "value": mb}}, upsert=True)
+    await message.answer(f"✅ Storage limit set: `{mb} MB`", parse_mode="Markdown")
+
+
+@dp.message(Command("notifyon"))
+async def cmd_notifyon(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/notifyon <album name/id>`", parse_mode="Markdown")
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.")
+    await albums_col.update_one({"_id": album["_id"]}, {"$addToSet": {"subscribers": message.from_user.id}})
+    await message.answer(f"🔔 Notifications ON: **{md(album['name'])}**", parse_mode="Markdown")
+
+
+@dp.message(Command("notifyoff"))
+async def cmd_notifyoff(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/notifyoff <album name/id>`", parse_mode="Markdown")
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.")
+    await albums_col.update_one({"_id": album["_id"]}, {"$pull": {"subscribers": message.from_user.id}})
+    await message.answer(f"🔕 Notifications OFF: **{md(album['name'])}**", parse_mode="Markdown")
+
+
 # ============================================================
 # UNKNOWN COMMAND
 # ============================================================
@@ -2440,6 +2771,8 @@ async def main():
         await albums_col.create_index([("album_id", 1)], unique=True, sparse=True)
         await albums_col.create_index([("tags", 1)])
         await albums_col.create_index([("created_by", 1)])
+        await albums_col.create_index([("updated_at", -1)])
+        await albums_col.create_index([("pinned", -1)])
         await db.granted_users.create_index([("user_id", 1)])
         await db.granted_users.create_index([("username", 1)])
         await b2_history_col.create_index([("sent_at", -1)])

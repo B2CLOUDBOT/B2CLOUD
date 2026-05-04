@@ -563,8 +563,6 @@ async def _handle_media(message: types.Message, file_id: str, unique_id: str, me
     uid = message.from_user.id
     if await cleanup_expired_session(uid):
         return await message.answer("⏰ Session timeout ho gaya. Dobara /album ya /add start karo.")
-    if not check_rate_limit(uid):
-        return await message.reply("🚫 Upload speed bahut fast hai. 1 minute baad try karo.")
     ok, limit_msg = await storage_limit_ok(file_size)
     if not ok:
         return await message.reply(limit_msg)
@@ -2251,6 +2249,7 @@ async def cmd_makelist(message: types.Message):
     args = message.text.split(maxsplit=1)
     title = args[1].strip() if len(args) > 1 else "B2 CLOUD"
 
+    # title save
     await db.settings.update_one(
         {"key": "checklist_title"},
         {"$set": {"key": "checklist_title", "value": title}},
@@ -2260,6 +2259,7 @@ async def cmd_makelist(message: types.Message):
     checklist_text = await rebuild_checklist_text()
     existing = await db.settings.find_one({"key": "checklist_msg_id"})
 
+    # ✅ CASE 1: already exists → ONLY EDIT
     if existing:
         msg_id = existing["value"]
         try:
@@ -2270,25 +2270,22 @@ async def cmd_makelist(message: types.Message):
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
-            try:
-                await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
-            except:
-                pass
 
             return await message.answer(
-                f"✅ Checklist same message me update ho gaya!\n🆔 `{msg_id}`",
+                f"✅ Checklist update ho gaya!\n🆔 `{msg_id}`",
                 parse_mode="Markdown"
             )
 
         except Exception as e:
             return await message.answer(
-                f"❌ Old checklist edit nahi hua.\n"
-                f"Old Message ID: `{msg_id}`\n\n"
-                f"Reason: `{e}`\n\n"
-                f"New checklist create nahi kiya, taki spam na ho.",
+                f"❌ Edit fail ho gaya!\n"
+                f"Message ID: `{msg_id}`\n\n"
+                f"⚠️ Old checklist delete ho chuka hai ya missing hai.\n"
+                f"👉 Ek baar `/removelist` chala ke fir `/makelist` karo.",
                 parse_mode="Markdown"
             )
 
+    # ✅ CASE 2: first time create
     sent = await bot.send_message(
         STORAGE_CHANNEL,
         checklist_text,
@@ -2296,10 +2293,7 @@ async def cmd_makelist(message: types.Message):
         disable_web_page_preview=True
     )
 
-    try:
-        await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
-    except:
-        pass
+    await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
 
     await db.settings.update_one(
         {"key": "checklist_msg_id"},
@@ -2308,7 +2302,7 @@ async def cmd_makelist(message: types.Message):
     )
 
     await message.answer(
-        f"✅ Checklist create ho gaya!\n📌 Pinned\n🆔 `{sent.message_id}`",
+        f"✅ Checklist create ho gaya!\n🆔 `{sent.message_id}`",
         parse_mode="Markdown"
     )
 

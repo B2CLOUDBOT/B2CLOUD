@@ -2104,55 +2104,67 @@ async def cmd_b2(message: types.Message):
 # ============================================================
 @dp.message(Command("makelist"))
 async def cmd_makelist(message: types.Message):
-    if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
+    if not is_owner(message.from_user.id):
+        return await message.answer("🚫 Sirf owner!")
+
     args = message.text.split(maxsplit=1)
     title = args[1].strip() if len(args) > 1 else "B2 CLOUD"
+
     await db.settings.update_one(
         {"key": "checklist_title"},
         {"$set": {"key": "checklist_title", "value": title}},
         upsert=True
     )
-    existing = await db.settings.find_one({"key": "checklist_msg_id"})
-    if existing:
-        return await message.answer(
-            f"⚠️ Checklist already exist karta hai!\n"
-            f"Message ID: `{existing['value']}`\n\n"
-            f"Update karna hai toh `/makelist` se pehle `/removelist` karo.",
-            parse_mode="Markdown"
-        )
+
     checklist_text = await rebuild_checklist_text()
+    existing = await db.settings.find_one({"key": "checklist_msg_id"})
+
+    if existing:
+        msg_id = existing["value"]
+        try:
+            await bot.edit_message_text(
+                chat_id=STORAGE_CHANNEL,
+                message_id=msg_id,
+                text=checklist_text,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+            try:
+                await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
+            except:
+                pass
+
+            return await message.answer(
+                f"✅ Checklist update ho gaya!\n📌 Same message update hua\n🆔 `{msg_id}`",
+                parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.warning(f"Old checklist edit failed, creating new one: {e}")
+
     try:
         sent = await bot.send_message(
-            STORAGE_CHANNEL, checklist_text,
-            parse_mode="Markdown", disable_web_page_preview=True
+            STORAGE_CHANNEL,
+            checklist_text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
         )
         await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+
         await db.settings.update_one(
             {"key": "checklist_msg_id"},
             {"$set": {"key": "checklist_msg_id", "value": sent.message_id}},
             upsert=True
         )
+
         await message.answer(
-            f"✅ **Checklist create ho gaya!**\n📌 Pinned\n🏷️ Title: **{title}**\n🆔 `{sent.message_id}`",
+            f"✅ Checklist create ho gaya!\n📌 Pinned\n🏷️ Title: **{title}**\n🆔 `{sent.message_id}`",
             parse_mode="Markdown"
         )
+
     except Exception as e:
         logger.error(f"makelist error: {e}")
         await message.answer(f"❌ Error: {e}")
-
-
-@dp.message(Command("removelist"))
-async def cmd_removelist(message: types.Message):
-    if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
-    setting = await db.settings.find_one({"key": "checklist_msg_id"})
-    if not setting:
-        return await message.answer("⚠️ Koi checklist nahi mila.")
-    try:
-        await bot.unpin_chat_message(STORAGE_CHANNEL, setting["value"])
-        await bot.delete_message(STORAGE_CHANNEL, setting["value"])
-    except: pass
-    await db.settings.delete_one({"key": "checklist_msg_id"})
-    await message.answer("🗑️ Checklist remove ho gaya!")
 
 
 # ============================================================

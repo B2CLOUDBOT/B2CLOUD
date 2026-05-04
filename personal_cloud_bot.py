@@ -188,6 +188,24 @@ def file_signature(item: dict) -> str:
     return f"{mtype}|{name}|{size}|{fid[:30]}|{text}"
 
 
+def normalize_folder(folder: str) -> str:
+    folder = (folder or "root").strip().strip("/")
+    folder = re.sub(r"\s+", " ", folder)
+    return folder or "root"
+
+
+def get_session_folder(session: dict) -> str:
+    return normalize_folder(session.get("current_folder", "root"))
+
+
+def unique_folders_from_files(files: list) -> list:
+    folders = set(["root"])
+    for f in files or []:
+        if isinstance(f, dict):
+            folders.add(normalize_folder(f.get("folder", "root")))
+    return sorted(folders, key=lambda x: (x != "root", x.lower()))
+
+
 def sort_session_items(items: list) -> list:
     """Original chat message order preserve karta hai.
     Photo/video handler kabhi text ke baad process hota hai, isliye save se pehle
@@ -371,6 +389,9 @@ async def process_and_save_items(session_photos: list) -> list:
             text_val = item.get("text", "")
             mid, _ = await send_to_storage("", "text", text_val)
             new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
+            new_item["folder"] = normalize_folder(item.get("folder", "root")) if isinstance(item, dict) else "root"
+            new_item["order"] = item.get("order", 0) if isinstance(item, dict) else 0
+            new_item["message_id"] = item.get("message_id", 0) if isinstance(item, dict) else 0
             new_item["sig"] = file_signature(new_item)
             if mid: new_item["storage_msg_id"] = mid
             saved_items.append(new_item)
@@ -521,7 +542,8 @@ async def cmd_album(message: types.Message):
 
     user_sessions[message.from_user.id] = {
         "mode": "create", "name": name,
-        "photos": [], "ids": set(), "started_at": now_db()
+        "photos": [], "ids": set(), "started_at": now_db(),
+        "current_folder": "root"
     }
 
     await message.answer(
@@ -559,6 +581,7 @@ async def _handle_media(message: types.Message, file_id: str, unique_id: str, me
         "message_id": message.message_id,
         "order": message.message_id,
         "seq": len(session.get("photos", [])) + 1,
+        "folder": get_session_folder(session),
     }
     item["sig"] = file_signature(item)
     session["photos"].append(item)
@@ -669,7 +692,8 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
         {
             "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
             "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
-            "$set": {"updated_at": now_db()}
+            "$set": {"updated_at": now_db()},
+            "$addToSet": {"folders": {"$each": unique_folders_from_files(saved_items)}}
         }
     )
 
@@ -755,37 +779,29 @@ async def cmd_close(message: types.Message):
             except: pass
 
             total_new = len(session["photos"])
-            saved_items = []
-            for idx, item in enumerate(sort_session_items(session["photos"]), 1):
-                fid   = item["file_id"] if isinstance(item, dict) else item
-                mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-                if mtype == "text":
-                    text_val = item.get("text", "")
-                    mid, _ = await send_to_storage("", "text", text_val)
-                    new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
-                    if mid: new_item["storage_msg_id"] = mid
-                    saved_items.append(new_item)
-                else:
-                    mid, fsize = await send_to_storage(fid, mtype)
-                    new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-                    if mid: new_item["storage_msg_id"] = mid
-                    if fsize: new_item["file_size"] = fsize
-                    saved_items.append(new_item)
-                await asyncio.sleep(0.2)
-                if idx % 5 == 0 or idx == total_new:
-                    try:
-                        await save_msg.edit_text(
-                            f"⏳ Uploading... {idx}/{total_new}\n📁 {session['name']}",
-                            parse_mode="Markdown"
-                        )
-                    except: pass
+            try:
+                await save_msg.edit_text(
+                    f"⏳ Uploading... 0/{total_new}\n📁 {session['name']}",
+                    parse_mode="Markdown"
+                )
+            except: pass
+            saved_items = await process_and_save_items(session["photos"])
+            new_count = len(saved_items)
+            new_photos, new_videos, new_docs, new_audios = count_media(saved_items)
+            try:
+                await save_msg.edit_text(
+                    f"⏳ Uploading... {new_count}/{total_new}\n📁 {session['name']}",
+                    parse_mode="Markdown"
+                )
+            except: pass
 
             await albums_col.update_one(
                 {"album_id": session["album_id"]},
                 {
                     "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
                     "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
-                    "$set": {"updated_at": now_db()}
+                    "$set": {"updated_at": now_db()},
+                    "$addToSet": {"folders": {"$each": unique_folders_from_files(saved_items)}}
                 }
             )
 
@@ -906,31 +922,20 @@ async def process_confirm(callback: types.CallbackQuery):
             created_msg_id = created_msg.message_id
         except: pass
 
-        saved_items = []
         total_files = len(session["photos"])
-        for idx, item in enumerate(sort_session_items(session["photos"]), 1):
-            fid   = item["file_id"] if isinstance(item, dict) else item
-            mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-            if mtype == "text":
-                text_val = item.get("text", "")
-                mid, _ = await send_to_storage("", "text", text_val)
-                new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
-                if mid: new_item["storage_msg_id"] = mid
-                saved_items.append(new_item)
-            else:
-                mid, fsize = await send_to_storage(fid, mtype)
-                new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-                if mid: new_item["storage_msg_id"] = mid
-                if fsize: new_item["file_size"] = fsize
-                saved_items.append(new_item)
-            await asyncio.sleep(0.2)
-            if idx % 5 == 0 or idx == total_files:
-                try:
-                    await save_msg.edit_text(
-                        f"⏳ Uploading... {idx}/{total_files}\n📁 {session['name']}",
-                        parse_mode="Markdown"
-                    )
-                except: pass
+        try:
+            await save_msg.edit_text(
+                f"⏳ Uploading... 0/{total_files}\n📁 {session['name']}",
+                parse_mode="Markdown"
+            )
+        except: pass
+        saved_items = await process_and_save_items(session["photos"])
+        try:
+            await save_msg.edit_text(
+                f"⏳ Uploading... {len(saved_items)}/{total_files}\n📁 {session['name']}",
+                parse_mode="Markdown"
+            )
+        except: pass
 
         photos, videos, docs, audios = count_media(saved_items)
 
@@ -947,6 +952,7 @@ async def process_confirm(callback: types.CallbackQuery):
             "updated_at": now_db(),
             "history": [{"action": "created", "count": len(saved_items), "by": uid, "at": now_db()}],
             "media_count": {"photos": photos, "videos": videos, "docs": docs, "audios": audios},
+            "folders": unique_folders_from_files(saved_items),
             "created_msg_id": created_msg_id
         }
 
@@ -1033,7 +1039,7 @@ async def cmd_add(message: types.Message):
         "mode": "add", "db_id": album["_id"],
         "album_id": album["album_id"], "name": album["name"],
         "photos": [], "ids": set(album.get("photo_unique_ids", [])),
-        "started_at": now_db()
+        "started_at": now_db(), "current_folder": "root"
     }
     await message.answer(
         f"➕ **Adding to: {album['name']}**\n🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
@@ -1074,7 +1080,8 @@ async def save_add(message: types.Message):
             {
                 "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
                 "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
-                "$set": {"updated_at": now_db()}
+                "$set": {"updated_at": now_db()},
+                "$addToSet": {"folders": {"$each": unique_folders_from_files(saved_items)}}
             }
         )
 
@@ -1551,6 +1558,140 @@ async def cmd_info(message: types.Message):
     await message.answer(text, parse_mode="Markdown")
 
 
+
+# ============================================================
+# FOLDER SYSTEM — Album ke andar folder
+# ============================================================
+@dp.message(Command("mkdir"))
+async def cmd_mkdir(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer(
+            "❌ Usage:\n`/mkdir <album name/id> <folder name>`\n\nExample: `/mkdir ALB-xxx Physics`",
+            parse_mode="Markdown"
+        )
+
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+    if album.get("locked"):
+        return await message.answer("🔒 Album locked hai!", parse_mode="Markdown")
+
+    folder = normalize_folder(args[2])
+    await albums_col.update_one(
+        {"_id": album["_id"]},
+        {"$addToSet": {"folders": folder}, "$set": {"updated_at": now_db()}}
+    )
+    await message.answer(f"📂 Folder created: **{folder}**\n📁 Album: **{album['name']}**", parse_mode="Markdown")
+
+
+@dp.message(Command("folders"))
+async def cmd_folders(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("❌ Usage: `/folders <album name/id>`", parse_mode="Markdown")
+
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+
+    folders = set(album.get("folders", [])) | set(unique_folders_from_files(album.get("photos", [])))
+    folders = sorted(folders, key=lambda x: (x != "root", x.lower()))
+
+    text = f"📂 *Folders in {album['name']}*\n━━━━━━━━━━━━━━━━━━\n"
+    for folder in folders:
+        count = sum(1 for f in album.get("photos", []) if isinstance(f, dict) and normalize_folder(f.get("folder", "root")) == folder)
+        text += f"\n📁 `{folder}` — {count} files\n👁 `/viewfolder {album['album_id']} {folder}`\n"
+    await message.answer(text.strip(), parse_mode="Markdown")
+
+
+@dp.message(Command("cd"))
+async def cmd_cd(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    uid = message.from_user.id
+    if uid not in user_sessions or user_sessions[uid].get("mode") not in ("create", "add"):
+        return await message.answer("⚠️ Active /album ya /add session nahi hai.")
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        current = get_session_folder(user_sessions[uid])
+        return await message.answer(f"📁 Current folder: `{current}`\nChange: `/cd Physics`", parse_mode="Markdown")
+
+    folder = normalize_folder(args[1])
+    user_sessions[uid]["current_folder"] = folder
+    await message.answer(f"📁 Current folder set: **{folder}**\nAb jo files/text bhejoge wo isi folder me save honge.", parse_mode="Markdown")
+
+
+@dp.message(Command("viewfolder"))
+async def cmd_viewfolder(message: types.Message, _password_ok: bool = False):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer(
+            "❌ Usage: `/viewfolder <album name/id> <folder>`",
+            parse_mode="Markdown"
+        )
+
+    album = await find_album(args[1].strip())
+    if not album:
+        return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+
+    uid = message.from_user.id
+    album_pass = album.get("password")
+    if album_pass and not is_owner(uid) and not _password_ok:
+        password_pending[uid] = {"action": "viewfolder", "album": album, "folder": normalize_folder(args[2])}
+        return await message.answer(f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:", parse_mode="Markdown")
+
+    folder = normalize_folder(args[2])
+    files = [f for f in album.get("photos", []) if isinstance(f, dict) and normalize_folder(f.get("folder", "root")) == folder]
+    if not files:
+        return await message.answer(f"📂 Folder empty hai: `{folder}`", parse_mode="Markdown")
+
+    await message.answer(f"📂 **{album['name']}** / `{folder}`\n🗂 {len(files)} files\n\n⏹ Rokna ho toh `/close` likhein", parse_mode="Markdown")
+    view_sessions[uid] = True
+    sent = failed = 0
+    for item in files:
+        if not view_sessions.get(uid):
+            await message.answer(f"⏹ View band kar diya.\n✅ {sent} files bhej chuke the.")
+            return
+        fid = item.get("file_id", "")
+        mtype = item.get("type", "photo")
+        channel_msg_id = item.get("channel_msg_id") or item.get("storage_msg_id")
+        try:
+            if mtype == "text":
+                await bot.send_message(message.chat.id, item.get("text", ""))
+            elif channel_msg_id:
+                await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
+            elif mtype == "video":
+                await bot.send_video(message.chat.id, fid)
+            elif mtype == "document":
+                await bot.send_document(message.chat.id, fid)
+            elif mtype == "audio":
+                await bot.send_audio(message.chat.id, fid)
+            elif mtype == "voice":
+                await bot.send_voice(message.chat.id, fid)
+            else:
+                await bot.send_photo(message.chat.id, fid)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.3)
+    view_sessions.pop(uid, None)
+    summary = f"✅ {sent}/{len(files)} items sent from `{folder}`!"
+    if failed:
+        summary += f"\n⚠️ {failed} failed."
+    await message.answer(summary, parse_mode="Markdown")
+
 # ============================================================
 # /view
 # ============================================================
@@ -1625,7 +1766,7 @@ async def view_by_id(message: types.Message, _password_ok: bool = False):
             return
         fid = item["file_id"] if isinstance(item, dict) else item
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
-        channel_msg_id = item.get("channel_msg_id") if isinstance(item, dict) else None
+        channel_msg_id = item.get("channel_msg_id") or item.get("storage_msg_id") if isinstance(item, dict) else None
         try:
             if mtype == "text":
                 text_val = item.get("text", "") if isinstance(item, dict) else ""
@@ -2244,7 +2385,9 @@ async def handle_text_and_password(message: types.Message):
                     "message_id": message.message_id,
                     "order": message.message_id,
                     "seq": len(session.get("photos", [])) + 1,
+                    "folder": get_session_folder(session),
                 })
+                session["photos"][-1]["sig"] = file_signature(session["photos"][-1])
                 # Silent save: user ko "Text saved!" spam nahi bhejna
             return
 
@@ -2272,6 +2415,10 @@ async def handle_text_and_password(message: types.Message):
     if action == "view":
         message.text = f"/view {fresh['album_id']}"
         await view_by_id(message, _password_ok=True)
+    elif action == "viewfolder":
+        folder = pending.get("folder", "root")
+        message.text = f"/viewfolder {fresh['album_id']} {folder}"
+        await cmd_viewfolder(message, _password_ok=True)
     elif action == "zip":
         message.text = f"/zip {fresh['album_id']}"
         await cmd_zip(message, _password_ok=True)
@@ -2809,6 +2956,7 @@ async def main():
         await albums_col.create_index([("created_by", 1)])
         await albums_col.create_index([("updated_at", -1)])
         await albums_col.create_index([("pinned", -1)])
+        await albums_col.create_index([("folders", 1)])
         await db.granted_users.create_index([("user_id", 1)])
         await db.granted_users.create_index([("username", 1)])
         await b2_history_col.create_index([("sent_at", -1)])

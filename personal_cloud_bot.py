@@ -28,6 +28,7 @@ def now_db():
 
 API_TOKEN = os.environ["API_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
+AUTO_DELETE_AFTER_SEC = 1800  # 30 min
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 STORAGE_CHANNEL = int(os.environ["STORAGE_CHANNEL"])
 
@@ -48,9 +49,25 @@ async def auto_delete_message(chat_id: int, message_id: int, delay: int = AUTO_D
 
 def patch_bot_auto_delete():
     method_names = ["send_message", "send_photo", "send_video", "send_document", "send_audio", "send_voice"]
+def patch_bot_auto_delete():
+    method_names = ["send_message", "send_photo", "send_video", "send_document", "send_audio", "send_voice"]
+
     for method_name in method_names:
         original = getattr(bot, method_name)
-        async def wrapper(*args, __original=original, **kwargs):
+
+        async def make_wrapper(orig_func):
+            async def wrapper(*args, **kwargs):
+                msg = await orig_func(*args, **kwargs)
+                try:
+                    chat_id = kwargs.get("chat_id") or (args[0] if args else None)
+                    if chat_id and int(chat_id) != int(STORAGE_CHANNEL):
+                        asyncio.create_task(auto_delete_message(int(chat_id), msg.message_id))
+                except:
+                    pass
+                return msg
+            return wrapper
+
+        setattr(bot, method_name, await make_wrapper(original))
             msg = await __original(*args, **kwargs)
             try:
                 chat_id = kwargs.get("chat_id")
@@ -91,7 +108,6 @@ granted_users: set = set()
 rate_cache = defaultdict(list)
 MAX_UPLOAD_PER_MIN = int(os.environ.get("MAX_UPLOAD_PER_MIN", "30"))
 SESSION_TIMEOUT_MIN = int(os.environ.get("SESSION_TIMEOUT_MIN", "60"))
-AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "1800"))  # 30 min
 
 # ── Registration code generator ──────────────────────────────
 async def get_or_create_reg_code(uid: int) -> str:

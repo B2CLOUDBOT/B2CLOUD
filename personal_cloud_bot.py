@@ -36,6 +36,47 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
+
+async def auto_delete_message(chat_id: int, message_id: int, delay: int = AUTO_DELETE_AFTER_SEC):
+    if int(chat_id) == int(STORAGE_CHANNEL):
+        return
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+def patch_bot_auto_delete():
+    method_names = ["send_message", "send_photo", "send_video", "send_document", "send_audio", "send_voice"]
+    for method_name in method_names:
+        original = getattr(bot, method_name)
+        async def wrapper(*args, __original=original, **kwargs):
+            msg = await __original(*args, **kwargs)
+            try:
+                chat_id = kwargs.get("chat_id")
+                if chat_id is None and args:
+                    chat_id = args[0]
+                if chat_id is None and hasattr(msg, "chat"):
+                    chat_id = msg.chat.id
+                if chat_id is not None and int(chat_id) != int(STORAGE_CHANNEL):
+                    asyncio.create_task(auto_delete_message(int(chat_id), msg.message_id))
+            except Exception:
+                pass
+            return msg
+        setattr(bot, method_name, wrapper)
+
+class AutoDeleteIncomingMiddleware:
+    async def __call__(self, handler, event, data):
+        try:
+            if isinstance(event, types.Message) and int(event.chat.id) != int(STORAGE_CHANNEL):
+                asyncio.create_task(auto_delete_message(event.chat.id, event.message_id))
+        except Exception:
+            pass
+        return await handler(event, data)
+
+patch_bot_auto_delete()
+dp.message.middleware(AutoDeleteIncomingMiddleware())
+
 client = AsyncIOMotorClient(MONGO_URI)
 db = client.personal_cloud_db
 albums_col = db.albums
@@ -50,6 +91,7 @@ granted_users: set = set()
 rate_cache = defaultdict(list)
 MAX_UPLOAD_PER_MIN = int(os.environ.get("MAX_UPLOAD_PER_MIN", "30"))
 SESSION_TIMEOUT_MIN = int(os.environ.get("SESSION_TIMEOUT_MIN", "60"))
+AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "1800"))  # 30 min
 
 # ── Registration code generator ──────────────────────────────
 async def get_or_create_reg_code(uid: int) -> str:
@@ -248,14 +290,6 @@ async def get_total_storage_bytes() -> int:
 
 
 async def storage_limit_ok(extra_bytes: int = 0) -> tuple[bool, str]:
-    setting = await db.settings.find_one({"key": "storage_limit_mb"})
-    limit_mb = int(setting.get("value", 0)) if setting else 0
-    if limit_mb <= 0:
-        return True, ""
-    used = await get_total_storage_bytes()
-    limit_bytes = limit_mb * 1024 * 1024
-    if used + int(extra_bytes or 0) > limit_bytes:
-        return False, f"🚫 Storage limit full hai. Used: {human_size(used)} / Limit: {human_size(limit_bytes)}"
     return True, ""
 
 
@@ -341,11 +375,16 @@ async def rebuild_checklist_text() -> str:
             lines.append(f"┃ ⚜ {name}")
         for idx, entry in enumerate(add_history, 1):
             add_mid = entry.get("msg_id")
+            folder_name = normalize_folder(entry.get("folder", "")) if entry.get("folder") else ""
             if add_mid:
                 add_link = f"https://t.me/c/{ch_id}/{add_mid}"
                 lines.append(f"┃       [{ordinal(idx)} Added]({add_link})")
+                if folder_name and folder_name != "root":
+                    lines.append(f"┃          📂 [{folder_name}]({add_link})")
             else:
                 lines.append(f"┃       {ordinal(idx)} Added")
+                if folder_name and folder_name != "root":
+                    lines.append(f"┃          📂 {folder_name}")
     body = "\n┃\n".join(lines) if lines else "┃ _(koi album nahi)_"
     text = (
         f"┏━━━━━━━✦❘༻༺❘✦━━━━━━━┓\n"
@@ -361,21 +400,31 @@ async def rebuild_checklist_text() -> str:
     return text
 
 async def update_checklist():
+    new_text = await rebuild_checklist_text()
+    setting = await db.settings.find_one({"key": "checklist_msg_id"})
+    if setting:
+        msg_id = setting.get("value")
+        try:
+            await bot.edit_message_text(
+                chat_id=STORAGE_CHANNEL, message_id=msg_id, text=new_text,
+                parse_mode="Markdown", disable_web_page_preview=True
+            )
+            try:
+                await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
+            except Exception:
+                pass
+            return msg_id
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                return msg_id
+            logger.warning(f"Checklist edit failed, creating new checklist: {e}")
+    sent = await bot.send_message(STORAGE_CHANNEL, new_text, parse_mode="Markdown", disable_web_page_preview=True)
     try:
-        setting = await db.settings.find_one({"key": "checklist_msg_id"})
-        if not setting:
-            return
-        msg_id = setting["value"]
-        new_text = await rebuild_checklist_text()
-        await bot.edit_message_text(
-            chat_id=STORAGE_CHANNEL,
-            message_id=msg_id,
-            text=new_text,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        logger.warning(f"Checklist update failed: {e}")
+        await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+    except Exception:
+        pass
+    await db.settings.update_one({"key": "checklist_msg_id"}, {"$set": {"key": "checklist_msg_id", "value": sent.message_id}}, upsert=True)
+    return sent.message_id
 
 
 async def process_and_save_items(session_photos: list) -> list:
@@ -415,6 +464,17 @@ async def cmd_start(message: types.Message):
     uid = message.from_user.id
     username = (message.from_user.username or "").lower()
     first_name = message.from_user.first_name or "there"
+
+    try:
+        await db.users.update_one(
+            {"user_id": uid},
+            {"$set": {"user_id": uid, "username": username, "full_name": message.from_user.full_name, "first_name": first_name, "last_seen": now_db(), "started": True}},
+            upsert=True
+        )
+        if username:
+            await db.users.update_one({"username": username}, {"$set": {"user_id": uid, "username": username, "full_name": message.from_user.full_name, "last_seen": now_db(), "started": True}}, upsert=True)
+    except Exception as e:
+        logger.warning(f"User save failed: {e}")
 
     if username:
         pending = await db.granted_users.find_one({"username": username, "pending": True})
@@ -704,7 +764,7 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
 
     await albums_col.update_one(
         {"album_id": session["album_id"]},
-        {"$push": {"add_history": {"msg_id": add_msg_id3, "count": new_count, "at": now_db()}}}
+        {"$push": {"add_history": {"msg_id": add_msg_id3, "count": new_count, "folder": get_session_folder(session), "at": now_db()}}}
     )
     await update_checklist()
     await callback.message.answer(f"✅ **+{new_count} items** add ho gaye!\n📁 **{session['name']}**", parse_mode="Markdown")
@@ -812,7 +872,7 @@ async def cmd_close(message: types.Message):
 
             await albums_col.update_one(
                 {"album_id": session["album_id"]},
-                {"$push": {"add_history": {"msg_id": add_msg_id, "count": new_count, "at": now_db()}}}
+                {"$push": {"add_history": {"msg_id": add_msg_id, "count": new_count, "folder": get_session_folder(session), "at": now_db()}}}
             )
             await update_checklist()
             try: await save_msg.delete()
@@ -830,11 +890,10 @@ async def cmd_close(message: types.Message):
         del user_sessions[uid]
         return
 
-    if uid in view_sessions:
-        view_sessions[uid] = False
-        return await message.answer("⏹ View band kar diya!")
-
-    if uid not in user_sessions or user_sessions[uid]["mode"] != "create":
+    if uid not in user_sessions or user_sessions[uid].get("mode") != "create":
+        if uid in view_sessions:
+            view_sessions[uid] = False
+            return await message.answer("⏹ View band kar diya!")
         return await message.answer("⚠️ Koi active session nahi hai.")
     session = user_sessions[uid]
     if not session["photos"]:
@@ -1024,27 +1083,51 @@ async def cmd_add(message: types.Message):
         return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer("❌ Usage: `/add AlbumName` ya `/add ALB-xxx`", parse_mode="Markdown")
-    name = args[1].strip()
-    album = await find_album(name)
+        return await message.answer("❌ Usage: `/add AlbumName` ya `/add ALB-xxx FolderName`", parse_mode="Markdown")
+
+    raw = args[1].strip()
+    album = None
+    folder = "root"
+
+    m = re.match(r"^(ALB-\S+)(?:\s+(.+))?$", raw, re.IGNORECASE)
+    if m:
+        album = await find_album(m.group(1).strip())
+        if m.group(2):
+            folder = normalize_folder(m.group(2))
+    else:
+        tokens = raw.split()
+        for i in range(len(tokens), 0, -1):
+            cand = " ".join(tokens[:i])
+            alb_try = await find_album(cand)
+            if alb_try:
+                album = alb_try
+                rest = " ".join(tokens[i:]).strip()
+                if rest:
+                    folder = normalize_folder(rest)
+                break
+
     if not album:
-        return await message.answer(f"❌ **'{name}'** nahi mila.", parse_mode="Markdown")
+        return await message.answer(f"❌ **'{raw}'** nahi mila.", parse_mode="Markdown")
     if album.get("locked"):
         return await message.answer(f"🔒 **'{album['name']}'** locked hai! Pehle `/unlock` karein.", parse_mode="Markdown")
     if message.from_user.id in user_sessions:
         del user_sessions[message.from_user.id]
+
     user_sessions[message.from_user.id] = {
         "mode": "add", "db_id": album["_id"],
         "album_id": album["album_id"], "name": album["name"],
         "photos": [], "ids": set(album.get("photo_unique_ids", [])),
-        "started_at": now_db(), "current_folder": "root"
+        "started_at": now_db(), "current_folder": folder
     }
+    if folder != "root":
+        await albums_col.update_one({"_id": album["_id"]}, {"$addToSet": {"folders": folder}})
+
+    folder_line = f"\n📂 Folder: **{md(folder)}**" if folder != "root" else ""
     await message.answer(
-        f"➕ **Adding to: {album['name']}**\n🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
+        f"➕ **Adding to: {md(album['name'])}**{folder_line}\n🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
         f"Files bhejein (photo/video/pdf/audio/text), phir `/close`\n❌ Cancel: `/cancel`",
         parse_mode="Markdown"
     )
-
 
 # ============================================================
 # /save_add
@@ -1092,7 +1175,7 @@ async def save_add(message: types.Message):
 
         await albums_col.update_one(
             {"album_id": session["album_id"]},
-            {"$push": {"add_history": {"msg_id": add_msg_id2, "count": new_count, "at": now_db()}}}
+            {"$push": {"add_history": {"msg_id": add_msg_id2, "count": new_count, "folder": get_session_folder(session), "at": now_db()}}}
         )
         await update_checklist()
         await message.answer(f"✅ **+{new_count} items** add ho gaye!\n📁 **{session['name']}**", parse_mode="Markdown")
@@ -1537,6 +1620,14 @@ async def cmd_info(message: types.Message):
     text += f"📊 Total: {album['count']}\n"
     text += f"💾 Size: {size_str}\n"
 
+    folders = album.get("folders") or unique_folders_from_files(album.get("photos", []))
+    folders = [normalize_folder(f) for f in folders if normalize_folder(f) != "root"]
+    if folders:
+        text += "\n📂 Folders:\n"
+        for f in sorted(set(folders), key=str.lower):
+            cnt = sum(1 for it in album.get("photos", []) if isinstance(it, dict) and normalize_folder(it.get("folder", "root")) == f)
+            text += f"   • {md(f)} — {cnt} files\n"
+
     history = album.get("history", [])
     if history:
         text += "\n📜 History:\n"
@@ -1669,7 +1760,7 @@ async def cmd_viewfolder(message: types.Message, _password_ok: bool = False):
             if mtype == "text":
                 await bot.send_message(message.chat.id, item.get("text", ""))
             elif channel_msg_id:
-                await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
+                await bot.copy_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
             elif mtype == "video":
                 await bot.send_video(message.chat.id, fid)
             elif mtype == "document":
@@ -1771,7 +1862,7 @@ async def view_by_id(message: types.Message, _password_ok: bool = False):
                 await bot.send_message(message.chat.id, text_val)
                 sent += 1
             elif channel_msg_id:
-                await bot.forward_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
+                await bot.copy_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
                 sent += 1
             elif mtype == "video":    await bot.send_video(message.chat.id, fid); sent += 1
             elif mtype == "document": await bot.send_document(message.chat.id, fid); sent += 1
@@ -1825,10 +1916,10 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
 
     # ── Config ──────────────────────────────────────────────
     # Telegram Bot API: get_file() sirf 20MB tak kaam karta hai
-    # Usse bade files direct forward honge
+    # Usse bade files direct send honge
     BOT_DOWNLOAD_LIMIT = 20 * 1024 * 1024   # 20 MB
     # ZIP part max size — Telegram document send limit 50MB hai
-    SPLIT_SIZE = 45 * 1024 * 1024            # 45 MB safe limit
+    SPLIT_SIZE = 18 * 1024 * 1024            # 18 MB safe limit to avoid timeout
 
     EXT_MAP = {
         "photo": "jpg", "video": "mp4",
@@ -1878,7 +1969,7 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
                 # Downloadable — ZIP mein jayegi
                 small_files.append((fid, mtype, fname, tg_file, storage_msg_id))
             else:
-                # Too large OR size unknown — direct forward
+                # Too large OR size unknown — direct send
                 large_files.append((fid, mtype, fname, storage_msg_id))
 
         except Exception as e:
@@ -1898,7 +1989,7 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
         await status_msg.edit_text(
             f"📊 **{album['name']}**\n"
             f"📦 ZIP banegi: {len(small_files)} files\n"
-            f"📤 Direct forward: {len(large_files)} files\n"
+            f"📤 Direct send: {len(large_files)} files\n"
             f"📝 Text items: {len(text_items)}\n"
             + (f"⚠️ Skip: {skip_count}\n" if skip_count else "")
             + "⏳ Processing...",
@@ -1908,7 +1999,7 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
 
     zip_parts_sent = 0
     total_zipped   = 0
-    forwarded      = 0
+    sent_direct      = 0
     fwd_failed     = 0
     dl_failed      = 0
 
@@ -2063,10 +2154,11 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
                 logger.info(f"Sending ZIP part {part_num}: {part_fname} ({zip_size_mb:.1f} MB, {file_count} files)")
 
                 try:
-                    await bot.send_document(
+                    await send_document_retry(
                         message.chat.id,
-                        document=types.BufferedInputFile(zip_bytes, filename=part_fname),
-                        caption=(
+                        zip_bytes,
+                        part_fname,
+                        (
                             f"📦 **{part_fname}**{part_label}\n"
                             f"🗂 {file_count} files | 💾 {zip_size_mb:.1f} MB\n"
                             f"📁 {album['name']}"
@@ -2080,7 +2172,7 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
                     logger.error(f"ZIP send error part {part_num}: {e}")
                     await message.answer(f"❌ ZIP Part {part_num} send nahi hua: {e}")
 
-    # ── Step 4: Large files direct forward ──────────────────
+    # ── Step 4: Large files direct send ──────────────────
     if large_files:
         try:
             await status_msg.edit_text(
@@ -2093,9 +2185,9 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
             try:
                 if storage_msg_id:
                     # Storage channel se forward karo
-                    await bot.forward_message(message.chat.id, STORAGE_CHANNEL, storage_msg_id)
-                    forwarded += 1
-                    logger.info(f"Forwarded via storage_msg_id: {storage_msg_id}")
+                    await bot.copy_message(message.chat.id, STORAGE_CHANNEL, storage_msg_id)
+                    sent_direct += 1
+                    logger.info(f"Copied via storage_msg_id: {storage_msg_id}")
                 elif fid:
                     # file_id se direct bhejo
                     if mtype == "video":
@@ -2108,7 +2200,7 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
                         await bot.send_voice(message.chat.id, fid)
                     else:
                         await bot.send_photo(message.chat.id, fid)
-                    forwarded += 1
+                    sent_direct += 1
                     logger.info(f"Sent via file_id: {fid[:20]}...")
                 else:
                     logger.warning(f"No storage_msg_id or file_id for {mtype}")
@@ -2124,16 +2216,16 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
         final_parts.append(f"📝 Text: {len(text_items)} items\n")
     if zip_parts_sent:
         final_parts.append(f"📦 ZIP: {zip_parts_sent} part(s), {total_zipped} files\n")
-    if forwarded:
-        final_parts.append(f"📤 Forwarded: {forwarded} large files\n")
+    if sent_direct:
+        final_parts.append(f"📤 Sent: {sent_direct} large files\n")
     if dl_failed:
-        final_parts.append(f"⚠️ Download failed (forwarded instead): {dl_failed}\n")
+        final_parts.append(f"⚠️ Download failed (sent_direct instead): {dl_failed}\n")
     if fwd_failed:
         final_parts.append(f"❌ Forward failed: {fwd_failed}\n")
     if skip_count:
         final_parts.append(f"⏭️ Skipped (no file_id): {skip_count}\n")
 
-    if zip_parts_sent == 0 and forwarded == 0 and not text_items:
+    if zip_parts_sent == 0 and sent_direct == 0 and not text_items:
         final_text = "❌ Koi bhi file process nahi ho saki.\n\nBot logs dekho ya `/view` se manually files lo."
     else:
         final_text = "".join(final_parts)
@@ -2176,63 +2268,67 @@ async def cmd_stats(message: types.Message):
 # ============================================================
 @dp.message(Command("b2"))
 async def cmd_b2(message: types.Message):
-    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         return await message.answer("❌ Usage: `/b2 <id/name> @u1 @u2` ya `/b2 <id/name> userid`", parse_mode="Markdown")
-    text = args[1].strip()
-    tokens = text.split()
-    if len(tokens) < 2: return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
+
+    tokens = args[1].strip().split()
+    if len(tokens) < 2:
+        return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
     targets_raw = []
-    name_tokens = []
-    for t in reversed(tokens):
-        if t.startswith("@") or t.lstrip("-").isdigit():
-            targets_raw.insert(0, t)
-        else:
-            name_tokens = tokens[:tokens.index(t) + 1]
-            break
-    if not targets_raw: return await message.answer("❌ Recipient (@user ya userid) dein.", parse_mode="Markdown")
-    if not name_tokens: return await message.answer("❌ Album name/id dein.", parse_mode="Markdown")
-    album_identifier = " ".join(name_tokens)
+    while tokens and (tokens[-1].startswith("@") or tokens[-1].lstrip("-").isdigit()):
+        targets_raw.insert(0, tokens.pop())
+    album_identifier = " ".join(tokens).strip()
+    if not album_identifier:
+        return await message.answer("❌ Album name/id dein.", parse_mode="Markdown")
+    if not targets_raw:
+        return await message.answer("❌ Recipient (@user ya userid) dein.", parse_mode="Markdown")
+
     album = await find_album(album_identifier)
-    if not album: return await message.answer(f"❌ Album '{album_identifier}' nahi mila.", parse_mode="Markdown")
+    if not album:
+        return await message.answer(f"❌ Album '{album_identifier}' nahi mila.", parse_mode="Markdown")
     files = album.get("photos", [])
-    if not files: return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
+    if not files:
+        return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
+
     target_ids = []
     for t in targets_raw:
         if t.lstrip("-").isdigit():
             target_ids.append((int(t), t))
         elif t.startswith("@"):
             uname = t.lstrip("@").lower()
-            doc = await db.granted_users.find_one({"username": uname})
-            if doc and doc.get("user_id"): target_ids.append((doc["user_id"], t))
-            else: await message.answer(f"⚠️ {t} ka ID nahi mila, skip.", parse_mode="Markdown")
-    if not target_ids: return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
-    await message.answer(f"📤 Sending **{album['name']}** to {len(target_ids)} user(s)...", parse_mode="Markdown")
+            doc = await db.users.find_one({"username": uname}) or await db.granted_users.find_one({"username": uname})
+            if doc and doc.get("user_id"):
+                target_ids.append((int(doc["user_id"]), t))
+            else:
+                await message.answer(f"⚠️ {t} ne bot me `/start` nahi kiya ya ID nahi mila, skip.", parse_mode="Markdown")
+    if not target_ids:
+        return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
+
+    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s)...", parse_mode="Markdown")
     for uid, uname in target_ids:
         try:
-            await bot.send_message(uid, f"📂 **{album['name']}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
+            await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             sent = 0
             for item in files:
                 fid = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 try:
                     if mtype == "text":
-                        text_val = item.get("text", "") if isinstance(item, dict) else ""
-                        await bot.send_message(uid, text_val)
-                        sent += 1
-                    elif mtype == "video": await bot.send_video(uid, fid); sent += 1
-                    elif mtype == "document": await bot.send_document(uid, fid); sent += 1
-                    elif mtype == "audio": await bot.send_audio(uid, fid); sent += 1
-                    else: await bot.send_photo(uid, fid); sent += 1
-                except: pass
-                await asyncio.sleep(0.3)
+                        await bot.send_message(uid, item.get("text", "") if isinstance(item, dict) else "")
+                    elif mtype == "video": await bot.send_video(uid, fid)
+                    elif mtype == "document": await bot.send_document(uid, fid)
+                    elif mtype == "audio": await bot.send_audio(uid, fid)
+                    elif mtype == "voice": await bot.send_voice(uid, fid)
+                    else: await bot.send_photo(uid, fid)
+                    sent += 1
+                except Exception as e:
+                    logger.warning(f"B2 item send failed to {uid}: {e}")
+                await asyncio.sleep(0.25)
             await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
-            await b2_history_col.insert_one({
-                "album_id": album["album_id"], "album_name": album["name"],
-                "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname,
-                "files_count": sent, "sent_at": now_db()
-            })
+            await b2_history_col.insert_one({"album_id": album["album_id"], "album_name": album["name"], "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname, "files_count": sent, "sent_at": now_db()})
             await message.answer(f"✅ **{uname}** ko {sent} items bhej di!", parse_mode="Markdown")
         except Exception as e:
             await message.answer(f"❌ **{uname}** ko bhejne mein error: {e}", parse_mode="Markdown")
@@ -2249,7 +2345,6 @@ async def cmd_makelist(message: types.Message):
     args = message.text.split(maxsplit=1)
     title = args[1].strip() if len(args) > 1 else "B2 CLOUD"
 
-    # title save
     await db.settings.update_one(
         {"key": "checklist_title"},
         {"$set": {"key": "checklist_title", "value": title}},
@@ -2259,7 +2354,6 @@ async def cmd_makelist(message: types.Message):
     checklist_text = await rebuild_checklist_text()
     existing = await db.settings.find_one({"key": "checklist_msg_id"})
 
-    # ✅ CASE 1: already exists → ONLY EDIT
     if existing:
         msg_id = existing["value"]
         try:
@@ -2270,22 +2364,25 @@ async def cmd_makelist(message: types.Message):
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
+            try:
+                await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
+            except:
+                pass
 
             return await message.answer(
-                f"✅ Checklist update ho gaya!\n🆔 `{msg_id}`",
+                f"✅ Checklist same message me update ho gaya!\n🆔 `{msg_id}`",
                 parse_mode="Markdown"
             )
 
         except Exception as e:
             return await message.answer(
-                f"❌ Edit fail ho gaya!\n"
-                f"Message ID: `{msg_id}`\n\n"
-                f"⚠️ Old checklist delete ho chuka hai ya missing hai.\n"
-                f"👉 Ek baar `/removelist` chala ke fir `/makelist` karo.",
+                f"❌ Old checklist edit nahi hua.\n"
+                f"Old Message ID: `{msg_id}`\n\n"
+                f"Reason: `{e}`\n\n"
+                f"New checklist create nahi kiya, taki spam na ho.",
                 parse_mode="Markdown"
             )
 
-    # ✅ CASE 2: first time create
     sent = await bot.send_message(
         STORAGE_CHANNEL,
         checklist_text,
@@ -2293,7 +2390,10 @@ async def cmd_makelist(message: types.Message):
         disable_web_page_preview=True
     )
 
-    await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+    try:
+        await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+    except:
+        pass
 
     await db.settings.update_one(
         {"key": "checklist_msg_id"},
@@ -2302,7 +2402,7 @@ async def cmd_makelist(message: types.Message):
     )
 
     await message.answer(
-        f"✅ Checklist create ho gaya!\n🆔 `{sent.message_id}`",
+        f"✅ Checklist create ho gaya!\n📌 Pinned\n🆔 `{sent.message_id}`",
         parse_mode="Markdown"
     )
 
@@ -2462,59 +2562,43 @@ async def send_greeting(user_id: int, fallback_name: str = "Friend"):
 
 @dp.message(Command("grant"))
 async def cmd_grant(message: types.Message):
-    if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
+    if not is_owner(message.from_user.id):
+        return await message.answer("🚫 Sirf owner!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer("❌ Usage:\n`/grant 123456789`\n`/grant @username`", parse_mode="Markdown")
+        return await message.answer("❌ Usage: `/grant <id/@username>`", parse_mode="Markdown")
     target = args[1].strip()
-    if target.lstrip("-").isdigit():
-        uid = int(target)
-        if uid == ADMIN_ID: return await message.answer("⚠️ Aap owner hain already!")
-        granted_users.add(uid)
-        fetched_username = None
-        fetched_fullname = None
-        try:
-            chat = await bot.get_chat(uid)
-            fetched_username = chat.username.lower() if chat.username else None
-            fetched_fullname = chat.full_name if hasattr(chat, "full_name") else None
-        except: pass
-        await db.granted_users.update_one(
-            {"user_id": uid},
-            {"$set": {"user_id": uid, "username": fetched_username, "full_name": fetched_fullname,
-                      "granted_at": now_db(), "granted_by": message.from_user.id}},
-            upsert=True
-        )
-        uname_str = f"@{fetched_username}" if fetched_username else f"ID: {uid}"
-        await message.answer(f"✅ Access Granted!\n👤 {uname_str}\n🆔 {uid}")
-        ok = await send_greeting(uid)
-        if not ok: await message.answer("⚠️ User ko greeting nahi gayi.")
-    elif target.startswith("@"):
+    uid = None
+    username = None
+    if target.startswith("@"): 
         username = target.lstrip("@").lower()
-        doc = await db.granted_users.find_one({"username": username})
+        doc = await db.users.find_one({"username": username})
         if doc and doc.get("user_id"):
-            uid = doc["user_id"]
-            granted_users.add(uid)
-            await db.granted_users.update_one(
-                {"user_id": uid},
-                {"$set": {"granted_at": now_db(), "granted_by": message.from_user.id}},
-                upsert=True
-            )
-            await message.answer(f"✅ **Access Granted!**\n👤 @{username} | 🆔 `{uid}`", parse_mode="Markdown")
-            ok = await send_greeting(uid, username)
-            if not ok: await message.answer("⚠️ User ko greeting nahi gayi.", parse_mode="Markdown")
-        else:
-            await db.granted_users.update_one(
-                {"username": username},
-                {"$set": {"username": username, "user_id": None, "granted_at": now_db(),
-                          "granted_by": message.from_user.id, "pending": True}},
-                upsert=True
-            )
-            await message.answer(
-                f"⏳ **Pending Grant!**\n👤 @{username}\nJab /start karenge, activate hoga.",
-                parse_mode="Markdown"
-            )
+            uid = int(doc["user_id"])
+    elif target.isdigit():
+        uid = int(target)
     else:
-        await message.answer("❌ Valid User ID ya @username dein.", parse_mode="Markdown")
+        username = target.lower()
+        doc = await db.users.find_one({"username": username})
+        if doc and doc.get("user_id"):
+            uid = int(doc["user_id"])
+
+    if uid:
+        granted_users.add(uid)
+        user_doc = await db.users.find_one({"user_id": uid}) or {}
+        username = username or user_doc.get("username", "")
+        await db.granted_users.update_one({"user_id": uid}, {"$set": {"user_id": uid, "username": username or "", "pending": False, "granted_at": now_db()}}, upsert=True)
+        await db.denied_users.delete_one({"user_id": uid})
+        try:
+            await bot.send_message(uid, "🎉 *Access Granted!*\n\nAb aap bot use kar sakte ho.\n📁 Album create/add/view/share available hai.\n\n/start dabao aur commands dekho.", parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Grant greeting send failed: {e}")
+        return await message.answer(f"✅ Access granted: `{uid}`", parse_mode="Markdown")
+
+    if username:
+        await db.granted_users.update_one({"username": username}, {"$set": {"username": username, "pending": True, "granted_at": now_db()}}, upsert=True)
+        return await message.answer(f"✅ @{username} ko pending grant de diya. Jab /start karega, access activate ho jayega.", parse_mode="Markdown")
+    await message.answer("❌ User nahi mila.", parse_mode="Markdown")
 
 @dp.message(Command("denied"))
 async def cmd_denied(message: types.Message):
@@ -2825,82 +2909,6 @@ async def cmd_recent(message: types.Message):
     await message.answer(text.strip(), parse_mode="Markdown")
 
 
-@dp.message(Command("dupes"))
-async def cmd_dupes(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return await message.answer("🚫 Access Denied!")
-    albums = await albums_col.find().to_list(1000)
-    seen = {}
-    dupes = []
-    for alb in albums:
-        for idx, f in enumerate(alb.get("photos", []), 1):
-            if not isinstance(f, dict):
-                continue
-            sig = f.get("sig") or file_signature(f)
-            if sig in seen:
-                dupes.append((seen[sig], alb.get("name"), alb.get("album_id"), idx))
-            else:
-                seen[sig] = (alb.get("name"), alb.get("album_id"), idx)
-    if not dupes:
-        return await message.answer("✅ Duplicate files nahi mile.")
-    text = "🧹 *Duplicate Checker*\n━━━━━━━━━━━━━━━━━━\n\n"
-    for old, name, aid, idx in dupes[:25]:
-        text += f"⚠️ Duplicate:\nOld: {md(old[0])} #{old[2]}\nNew: {md(name)} #{idx}\n🆔 `{aid}`\n\n"
-    if len(dupes) > 25:
-        text += f"Aur `{len(dupes)-25}` duplicates bhi hain.\n"
-    await message.answer(text.strip(), parse_mode="Markdown")
-
-
-@dp.message(Command("limit"))
-async def cmd_limit(message: types.Message):
-    if not is_owner(message.from_user.id):
-        return await message.answer("🚫 Sirf owner!")
-    args = message.text.split(maxsplit=1)
-    if len(args) == 1:
-        setting = await db.settings.find_one({"key": "storage_limit_mb"})
-        val = setting["value"] if setting else 0
-        used = await get_total_storage_bytes()
-        return await message.answer(f"📦 Current storage limit: `{val} MB`\n💾 Used: `{human_size(used)}`\n\nSet: `/limit 5000`\nOff: `/limit off`", parse_mode="Markdown")
-    val = args[1].strip().lower()
-    if val == "off":
-        await db.settings.update_one({"key": "storage_limit_mb"}, {"$set": {"key": "storage_limit_mb", "value": 0}}, upsert=True)
-        return await message.answer("✅ Storage limit OFF.")
-    try:
-        mb = int(val)
-    except Exception:
-        return await message.answer("❌ Usage: `/limit 5000`", parse_mode="Markdown")
-    await db.settings.update_one({"key": "storage_limit_mb"}, {"$set": {"key": "storage_limit_mb", "value": mb}}, upsert=True)
-    await message.answer(f"✅ Storage limit set: `{mb} MB`", parse_mode="Markdown")
-
-
-@dp.message(Command("notifyon"))
-async def cmd_notifyon(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.answer("❌ Usage: `/notifyon <album name/id>`", parse_mode="Markdown")
-    album = await find_album(args[1].strip())
-    if not album:
-        return await message.answer("❌ Album nahi mila.")
-    await albums_col.update_one({"_id": album["_id"]}, {"$addToSet": {"subscribers": message.from_user.id}})
-    await message.answer(f"🔔 Notifications ON: **{md(album['name'])}**", parse_mode="Markdown")
-
-
-@dp.message(Command("notifyoff"))
-async def cmd_notifyoff(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.answer("❌ Usage: `/notifyoff <album name/id>`", parse_mode="Markdown")
-    album = await find_album(args[1].strip())
-    if not album:
-        return await message.answer("❌ Album nahi mila.")
-    await albums_col.update_one({"_id": album["_id"]}, {"$pull": {"subscribers": message.from_user.id}})
-    await message.answer(f"🔕 Notifications OFF: **{md(album['name'])}**", parse_mode="Markdown")
-
-
 # ============================================================
 # UNKNOWN COMMAND
 # ============================================================
@@ -2961,6 +2969,8 @@ async def main():
         await db.reg_codes.create_index([("user_id", 1)], unique=True)
         await db.reg_codes.create_index([("code", 1)], unique=True)
         await db.denied_users.create_index([("user_id", 1)], unique=True)
+        await db.users.create_index([("user_id", 1)], unique=True)
+        await db.users.create_index([("username", 1)])
         granted_docs = await db.granted_users.find(
             {"user_id": {"$ne": None}, "pending": {"$ne": True}}
         ).to_list(500)

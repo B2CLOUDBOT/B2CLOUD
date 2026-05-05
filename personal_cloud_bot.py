@@ -28,7 +28,7 @@ def now_db():
 
 API_TOKEN = os.environ["API_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
-AUTO_DELETE_AFTER_SEC = 1800  # 30 min
+AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "1800"))  # 30 min
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 STORAGE_CHANNEL = int(os.environ["STORAGE_CHANNEL"])
 
@@ -38,10 +38,10 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-async def auto_delete_message(chat_id: int, message_id: int, delay: int = AUTO_DELETE_AFTER_SEC):
+async def auto_delete_message(chat_id: int, message_id: int, delay: int | None = None):
     if int(chat_id) == int(STORAGE_CHANNEL):
         return
-    await asyncio.sleep(delay)
+    await asyncio.sleep(AUTO_DELETE_AFTER_SEC if delay is None else delay)
     try:
         await bot.delete_message(chat_id, message_id)
     except Exception:
@@ -49,26 +49,10 @@ async def auto_delete_message(chat_id: int, message_id: int, delay: int = AUTO_D
 
 def patch_bot_auto_delete():
     method_names = ["send_message", "send_photo", "send_video", "send_document", "send_audio", "send_voice"]
-def patch_bot_auto_delete():
-    method_names = ["send_message", "send_photo", "send_video", "send_document", "send_audio", "send_voice"]
 
-    for method_name in method_names:
-        original = getattr(bot, method_name)
-
-        async def make_wrapper(orig_func):
-            async def wrapper(*args, **kwargs):
-                msg = await orig_func(*args, **kwargs)
-                try:
-                    chat_id = kwargs.get("chat_id") or (args[0] if args else None)
-                    if chat_id and int(chat_id) != int(STORAGE_CHANNEL):
-                        asyncio.create_task(auto_delete_message(int(chat_id), msg.message_id))
-                except:
-                    pass
-                return msg
-            return wrapper
-
-        setattr(bot, method_name, await make_wrapper(original))
-            msg = await __original(*args, **kwargs)
+    def make_wrapper(orig_func):
+        async def wrapper(*args, **kwargs):
+            msg = await orig_func(*args, **kwargs)
             try:
                 chat_id = kwargs.get("chat_id")
                 if chat_id is None and args:
@@ -80,7 +64,11 @@ def patch_bot_auto_delete():
             except Exception:
                 pass
             return msg
-        setattr(bot, method_name, wrapper)
+        return wrapper
+
+    for method_name in method_names:
+        original = getattr(bot, method_name)
+        setattr(bot, method_name, make_wrapper(original))
 
 class AutoDeleteIncomingMiddleware:
     async def __call__(self, handler, event, data):

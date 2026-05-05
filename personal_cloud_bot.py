@@ -94,8 +94,8 @@ granted_users: set = set()
 
 # FREE EXTRA FEATURES SETTINGS
 rate_cache = defaultdict(list)
-MAX_UPLOAD_PER_MIN = int(os.environ.get("MAX_UPLOAD_PER_MIN", "30"))
-SESSION_TIMEOUT_MIN = int(os.environ.get("SESSION_TIMEOUT_MIN", "60"))
+MAX_UPLOAD_PER_MIN = int(os.environ.get("MAX_UPLOAD_PER_MIN", "99999"))
+SESSION_TIMEOUT_MIN = int(os.environ.get("SESSION_TIMEOUT_MIN", "99999"))
 
 # ── Registration code generator ──────────────────────────────
 async def get_or_create_reg_code(uid: int) -> str:

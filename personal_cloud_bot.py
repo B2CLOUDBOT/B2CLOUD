@@ -28,7 +28,7 @@ def now_db():
 
 API_TOKEN = os.environ["API_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
-AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "1800"))  # 30 min
+AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "3600"))  # 1 hour
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 STORAGE_CHANNEL = int(os.environ["STORAGE_CHANNEL"])
 
@@ -86,6 +86,10 @@ client = AsyncIOMotorClient(MONGO_URI)
 db = client.personal_cloud_db
 albums_col = db.albums
 b2_history_col = db.b2_history
+
+# Runtime controls
+b2_cancel_flags = set()
+album_save_lock = asyncio.Lock()  # ek time par sirf 1 album/add save hoga
 
 user_sessions = {}
 view_sessions = {}
@@ -240,6 +244,23 @@ def normalize_folder(folder: str) -> str:
     return folder or "root"
 
 
+def same_folder_key(folder: str) -> str:
+    return normalize_folder(folder).casefold()
+
+
+def canonical_folder_name(existing_folders: list, requested: str) -> str:
+    """Same album me same folder dobara create nahi hoga.
+    Example: June 2018 / june 2018 /  June  2018  => pehla wala folder hi use hoga.
+    """
+    req = normalize_folder(requested)
+    req_key = same_folder_key(req)
+    for f in existing_folders or []:
+        old = normalize_folder(f)
+        if same_folder_key(old) == req_key:
+            return old
+    return req
+
+
 def get_session_folder(session: dict) -> str:
     return normalize_folder(session.get("current_folder", "root"))
 
@@ -345,6 +366,28 @@ async def send_to_storage(fid: str, mtype: str, text_content: str = ""):
                 return None, 0
     logger.error(f"Storage send failed after 5 retries: {fid}")
     return None, 0
+
+
+async def send_document_retry(chat_id: int, file_bytes: bytes, filename: str, caption: str = "", parse_mode: str | None = None, retries: int = 5):
+    """Fix for /zip error: name 'send_document_retry' is not defined.
+    Bytes ko BufferedInputFile bana ke retry ke sath document send karta hai.
+    """
+    from aiogram.types import BufferedInputFile
+
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            doc = BufferedInputFile(file_bytes, filename=filename)
+            return await bot.send_document(chat_id=chat_id, document=doc, caption=caption, parse_mode=parse_mode)
+        except Exception as e:
+            last_error = e
+            wait_sec = 2 * attempt
+            m = re.search(r"retry after (\d+)", str(e), re.I)
+            if m:
+                wait_sec = int(m.group(1)) + 2
+            logger.warning(f"send_document_retry failed {attempt}/{retries}: {e}; waiting {wait_sec}s")
+            await asyncio.sleep(wait_sec)
+    raise last_error
 
 
 # ============================================================
@@ -1112,6 +1155,10 @@ async def cmd_add(message: types.Message):
 
     if not album:
         return await message.answer(f"❌ **'{raw}'** nahi mila.", parse_mode="Markdown")
+
+    # Same album me same folder name dobara create nahi hoga; existing folder reuse hoga.
+    folder = canonical_folder_name(album.get("folders", []), folder)
+
     if album.get("locked"):
         return await message.answer(f"🔒 **'{album['name']}'** locked hai! Pehle `/unlock` karein.", parse_mode="Markdown")
     if message.from_user.id in user_sessions:
@@ -1540,7 +1587,7 @@ async def cmd_tag(message: types.Message):
 async def cmd_list(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     try:
-        albums = await albums_col.find().sort("created_at", -1).to_list(length=50)
+        albums = await albums_col.find().sort([("pinned", -1), ("created_at", -1)]).to_list(length=50)
         if not albums:
             return await message.answer("📂 Cloud empty hai! /album se banayein.")
         total_files = sum(a.get("count", 0) for a in albums)
@@ -1553,6 +1600,8 @@ async def cmd_list(message: types.Message):
         )
         for alb in albums:
             icon = "🔒" if alb.get("locked") else "📁"
+            if alb.get("pinned"):
+                icon = "📌" + icon
             aid  = alb.get("album_id") or "N/A"
             name = alb.get("name") or "Unnamed"
             lines += f"{icon} {name}\n🆔 `{aid}`\n\n"
@@ -2243,8 +2292,8 @@ async def cmd_zip(message: types.Message, _password_ok: bool = False):
 # ============================================================
 # /stats
 # ============================================================
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
+@dp.message(Command("__oldstats"))
+async def cmd_stats_old(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     try:
         total = await albums_col.count_documents({})
@@ -2311,12 +2360,19 @@ async def cmd_b2(message: types.Message):
     if not target_ids:
         return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
 
-    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s)...", parse_mode="Markdown")
+    b2_cancel_flags.discard(message.from_user.id)
+    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s)...\n⛔ Stop karna ho to `/cancel` bhejo.", parse_mode="Markdown")
     for uid, uname in target_ids:
+        if message.from_user.id in b2_cancel_flags:
+            b2_cancel_flags.discard(message.from_user.id)
+            return await message.answer("⛔ /b2 stopped by /cancel", parse_mode="Markdown")
         try:
             await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             sent = 0
             for item in files:
+                if message.from_user.id in b2_cancel_flags:
+                    b2_cancel_flags.discard(message.from_user.id)
+                    return await message.answer(f"⛔ /b2 stopped. Last target: **{uname}**", parse_mode="Markdown")
                 fid = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 try:
@@ -2535,13 +2591,17 @@ async def cmd_cancel(message: types.Message):
     if uid in user_sessions:
         session = user_sessions[uid]
         del user_sessions[uid]
+        b2_cancel_flags.add(uid)
         await message.answer(
             f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n"
             f"_{len(session.get('photos', []))} unsaved items discard ho gaye._",
             parse_mode="Markdown"
         )
     else:
-        await message.answer("⚠️ Koi active session nahi.")
+        if uid in b2_cancel_flags:
+            return await message.answer("⛔ Stop signal already sent.")
+        b2_cancel_flags.add(uid)
+        await message.answer("⛔ Stop signal sent. Agar /b2 chal raha hai to ruk jayega.")
 
 
 # ============================================================
@@ -2860,8 +2920,8 @@ async def cmd_sort(message: types.Message):
     await message.answer(text.strip(), parse_mode="Markdown")
 
 
-@dp.message(Command("stats2"))
-async def cmd_stats2(message: types.Message):
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
     albums = await albums_col.find().to_list(1000)
@@ -2899,8 +2959,8 @@ async def cmd_stats2(message: types.Message):
     await message.answer(text, parse_mode="Markdown")
 
 
-@dp.message(Command("recent"))
-async def cmd_recent(message: types.Message):
+@dp.message(Command("__removed_recent"))
+async def cmd_recent_removed(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
     albums = await albums_col.find().sort("updated_at", -1).to_list(20)
@@ -2911,6 +2971,38 @@ async def cmd_recent(message: types.Message):
         dt = safe_ist(alb.get("updated_at", alb.get("created_at")))
         text += f"📁 *{md(alb.get('name', 'Unnamed'))}*\n🆔 `{alb.get('album_id')}`\n🕐 {dt}\n👁 `/view {alb.get('album_id')}`\n\n"
     await message.answer(text.strip(), parse_mode="Markdown")
+
+
+# ============================================================
+# /list - granted users + last 5 /b2 history
+# ============================================================
+@dp.message(Command("list"))
+async def cmd_list_granted_and_b2(message: types.Message):
+    if not is_owner(message.from_user.id):
+        return await message.answer("🚫 Sirf owner!")
+
+    users = await db.granted_users.find({}).sort("granted_at", -1).to_list(200)
+    hist = await b2_history_col.find({}).sort("sent_at", -1).to_list(5)
+
+    text = "👥 *Granted Users*\n━━━━━━━━━━━━━━━━━━\n"
+    if not users:
+        text += "Koi granted user nahi.\n"
+    else:
+        for i, u in enumerate(users[:50], 1):
+            uname = ("@" + u.get("username")) if u.get("username") else "N/A"
+            uid = u.get("user_id", "pending")
+            name = md(u.get("full_name", "")) or "-"
+            text += f"{i}. {uname} | `{uid}` | {name}\n"
+
+    text += "\n📤 *Last 5 /b2 History*\n━━━━━━━━━━━━━━━━━━\n"
+    if not hist:
+        text += "Abhi tak /b2 history empty hai.\n"
+    else:
+        for h in hist:
+            t = safe_ist(h.get("sent_at"))
+            text += f"• {md(h.get('album_name','?'))} → {md(str(h.get('sent_to_name','?')))} | `{h.get('files_count',0)}` files | {t}\n"
+
+    await message.answer(text[:3900], parse_mode="Markdown")
 
 
 # ============================================================

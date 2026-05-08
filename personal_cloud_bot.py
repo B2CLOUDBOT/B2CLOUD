@@ -575,6 +575,8 @@ async def cmd_start(message: types.Message):
         "🗂 *Organize*\n"
         "┣ /lock `<name/id>` — Album lock karo\n"
         "┣ /unlock `<name/id>` — Album unlock karo\n"
+        "┣ /pin `<name/id>` — Album pin karo\n"
+        "┣ /unpin `<name/id>` — Album unpin karo\n"
         "┣ /rename `<old>` `<new>` — Album rename karo\n"
         "┣ /merge `<id1>` `<id2>` `<name>` — Merge karo\n"
         "┣ /tag `<name/id>` `#tag1` `#tag2` — Tags lagao\n"
@@ -585,6 +587,8 @@ async def cmd_start(message: types.Message):
         "┣ /albums — Saare albums dekho\n"
         "┣ /view `<name/id>` — Album files dekho\n"
         "┣ /view `#tag1` `#tag2` — Tag se search karo\n"
+        "┣ /search `name/file/tag` — name file tag id\n"
+        "┣ /sort `date/sizes/name/files` — Sort Album (date/size/name/files) dekho\n"
         "┣ /info `<name/id>` — Album details\n"
         "┗ /stats — Cloud stats\n\n"
         "📤 *Share & Export*\n"
@@ -601,7 +605,7 @@ async def cmd_start(message: types.Message):
             "┣ /idinfo — Granted users + albums\n"
             "┣ /idinfo `<id/@user>` — Kisi ka bhi info\n"
             "┣ /makelist `<title>` — Checklist banao\n"
-            "┗ /removelist — Checklist hatao"
+            "┣ /list `<title>` — Granted + History\n"
         )
         await message.answer(common + owner_extra, parse_mode="Markdown")
     else:

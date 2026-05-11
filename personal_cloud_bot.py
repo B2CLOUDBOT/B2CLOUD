@@ -474,10 +474,13 @@ async def update_checklist():
     return sent.message_id
 
 
-async def process_and_save_items(session_photos: list) -> list:
+# ============================================================
+# process_and_save_items — with progress callback
+# ============================================================
+async def process_and_save_items(session_photos: list, progress_cb=None) -> list:
     saved_items = []
-    # Always save in original user-message sequence
-    for item in sort_session_items(session_photos):
+    total = len(session_photos)
+    for idx, item in enumerate(sort_session_items(session_photos), 1):
         fid   = item["file_id"] if isinstance(item, dict) else item
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
 
@@ -498,6 +501,13 @@ async def process_and_save_items(session_photos: list) -> list:
             if fsize: new_item["file_size"] = fsize
             new_item["sig"] = file_signature(new_item)
             saved_items.append(new_item)
+
+        # Progress update every 10 files
+        if progress_cb and idx % 10 == 0:
+            try:
+                await progress_cb(idx, total)
+            except Exception:
+                pass
 
         await asyncio.sleep(0.2)
     return saved_items
@@ -894,7 +904,16 @@ async def cmd_close(message: types.Message):
                     parse_mode="Markdown"
                 )
             except: pass
-            saved_items = await process_and_save_items(session["photos"])
+            async def _progress(done, total):
+                try:
+                    await save_msg.edit_text(
+                        f"⏳ Uploading... {done}/{total}\n📁 {session['name']}",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+
+            saved_items = await process_and_save_items(session["photos"], progress_cb=_progress)
             new_count = len(saved_items)
             new_photos, new_videos, new_docs, new_audios = count_media(saved_items)
             try:

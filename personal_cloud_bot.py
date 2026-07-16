@@ -2555,7 +2555,7 @@ async def cmd_stats_old(message: types.Message):
 # /b2
 # ============================================================
 @dp.message(Command("b2"))
-async def cmd_b2(message: types.Message):
+async def cmd_b2(message: types.Message, _password_ok: bool = False):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
@@ -2577,6 +2577,16 @@ async def cmd_b2(message: types.Message):
     album = await find_album(album_identifier)
     if not album:
         return await message.answer(f"❌ Album '{album_identifier}' nahi mila.", parse_mode="Markdown")
+        
+    uid = message.from_user.id
+    album_pass = album.get("password")
+    if album_pass and not is_owner(uid) and not _password_ok:
+        password_pending[uid] = {"action": "b2", "album": album, "targets": targets_raw}
+        return await message.answer(
+            f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:",
+            parse_mode="Markdown"
+        )
+        
     files = album.get("photos", [])
     if not files:
         return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
@@ -2726,6 +2736,8 @@ async def handle_text_and_password(message: types.Message):
     if uid in user_sessions:
         session = user_sessions[uid]
         if session.get("mode") in ("create", "add"):
+            if not check_rate_limit(uid):
+                return await message.reply("⚠️ Rate limit reached. Thoda wait karke text bhejin.")
             text_content = message.text.strip()
             if text_content:
                 session["photos"].append({
@@ -2773,6 +2785,11 @@ async def handle_text_and_password(message: types.Message):
     elif action == "zip":
         message.text = f"/zip {fresh['album_id']}"
         await cmd_zip(message, _password_ok=True)
+    elif action == "b2":
+        targets = pending.get("targets", [])
+        targets_str = " ".join(targets)
+        message.text = f"/b2 {fresh['album_id']} {targets_str}"
+        await cmd_b2(message, _password_ok=True)
 
 
 
@@ -2895,14 +2912,14 @@ async def cmd_idinfo(message: types.Message):
             fullname = u.get("full_name", "")
             date     = safe_ist(u.get("granted_at", now_db()))
             albums   = await albums_col.find({"created_by": uid_val}).sort("created_at", -1).to_list(50)
-            if fullname: text += f"📛 {fullname}\n"
-            if uname:    text += f"👤 @{uname}\n"
+            if fullname: text += f"📛 {md(fullname)}\n"
+            if uname:    text += f"👤 @{md(uname)}\n"
             text += f"🆔 `{uid_val}`\n📅 Granted: {date}\n"
             if albums:
                 text += f"📁 Albums ({len(albums)}):\n"
                 for alb in albums:
                     alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y")
-                    text += f"   • {alb['name']} | 🗂{alb['count']} | {alb_date}\n"
+                    text += f"   • {md(alb['name'])} | 🗂{alb['count']} | {alb_date}\n"
             else:
                 text += "📁 Koi album nahi\n"
             text += "\n━━━━━━━━━━━━━━━━━━\n\n"
@@ -2954,7 +2971,7 @@ async def cmd_idinfo(message: types.Message):
 
     text = "👤 *User Info*\n━━━━━━━━━━━━━━━━━━\n"
     if tg_name:     text += f"📛 {md(tg_name)}\n"
-    if tg_username: text += f"🔗 @{tg_username}\n"
+    if tg_username: text += f"🔗 @{md(tg_username)}\n"
     text += f"🆔 `{target_uid}`\n📊 Status: {status}\n"
     if granted_doc:
         text += f"📅 Granted: {safe_ist(granted_doc.get('granted_at', now_db()))}\n"
@@ -2983,8 +3000,10 @@ async def cmd_idinfo(message: types.Message):
 async def cmd_id(message: types.Message):
     user = message.from_user
     uname = f"@{user.username}" if user.username else "N/A"
+    escaped_name = md(user.full_name or "Unknown")
+    escaped_uname = md(uname)
     await message.answer(
-        f"👤 **Your Info:**\n🆔 User ID: `{user.id}`\n📛 Name: {user.full_name}\n🔗 Username: {uname}",
+        f"👤 **Your Info:**\n🆔 User ID: `{user.id}`\n📛 Name: {escaped_name}\n🔗 Username: {escaped_uname}",
         parse_mode="Markdown"
     )
 
@@ -3226,7 +3245,12 @@ async def main():
     try:
         await client.admin.command("ping")
         logger.info("✅ MongoDB connected!")
-        await albums_col.create_index([("name", 1)])
+        try:
+            from pymongo.collation import Collation
+            await albums_col.create_index([("name", 1)], unique=True, collation=Collation(locale="en", strength=2))
+        except Exception as idx_err:
+            logger.warning(f"Could not create unique case-insensitive index on name: {idx_err}. Creating normal index.")
+            await albums_col.create_index([("name", 1)])
         await albums_col.create_index([("album_id", 1)], unique=True, sparse=True)
         await albums_col.create_index([("tags", 1)])
         await albums_col.create_index([("created_by", 1)])

@@ -683,8 +683,7 @@ async def cmd_start(message: types.Message):
         "📁 *Album Management*\n"
         "┣ /album `<name>` — Naya album banao\n"
         "┣ /add `<name/id>` — Files add karo\n"
-        "┣ /close — Save karo ya view rokna\n"
-        "┗ /cancel — Session cancel karo\n\n"
+        "┗ /close — Save/Cancel session ya view rokna\n\n"
         "🗂 *Organize*\n"
         "┣ /lock `<name/id>` — Album lock karo\n"
         "┣ /unlock `<name/id>` — Album unlock karo\n"
@@ -985,145 +984,92 @@ async def warn_save_first(callback: types.CallbackQuery):
 # ============================================================
 # /close
 # ============================================================
-@dp.message(Command("close"))
+@dp.message(Command("close", "cancel"))
 async def cmd_close(message: types.Message):
     uid = message.from_user.id
+    password_pending.pop(uid, None)
 
-    if uid in user_sessions and user_sessions[uid]["mode"] == "add":
+    if uid in user_sessions:
         session = user_sessions[uid]
-        if not session["photos"]:
-            del user_sessions[uid]
-            return await message.answer("⚠️ Koi file nahi bheji. Session cancel.")
-        try:
-            new_count = len(session["photos"])
-            new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
-            user = message.from_user
-            user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
-            save_msg = await message.answer(
-                f"⏳ **Files save ho rahi hain...**\n📁 {session['name']}",
-                parse_mode="Markdown"
-            )
-            add_msg_id = None
-            try:
-                add_msg = await bot.send_message(STORAGE_CHANNEL,
-                    f"📁 **Files Added**\nName: {session['name']}\nBy: {user_info}",
-                    parse_mode="Markdown")
-                add_msg_id = add_msg.message_id
-            except: pass
+        mode = session.get("mode")
+        if mode in ("create", "add"):
+            if not session["photos"]:
+                del user_sessions[uid]
+                return await message.answer("⚠️ Koi file nahi thi. Session cancel.")
 
-            total_new = len(session["photos"])
-            try:
-                await save_msg.edit_text(
-                    f"⏳ Uploading... 0/{total_new}\n📁 {session['name']}",
-                    parse_mode="Markdown"
+            # Build preview
+            duration = (now_db() - session["started_at"]).seconds // 60
+            photos, videos, docs, audios = count_media(session["photos"])
+            stats = ""
+            if photos: stats += f"📸 {photos} photos\n"
+            if videos: stats += f"🎥 {videos} videos\n"
+            if docs: stats += f"📄 {docs} documents\n"
+            if audios: stats += f"🎵 {audios} audio\n"
+
+            if mode == "create":
+                auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
+                preview_caption = (
+                    f"📝 **ALBUM PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
+                    f"📁 Name: **{session['name']}**\n🆔 ID: `{auto_id}`\n{stats}"
+                    f"⏱ Session: ~{duration} min\n━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
                 )
-            except: pass
-            async def _progress(done, total):
+                builder = InlineKeyboardBuilder()
+                builder.row(
+                    types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
+                    types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
+                )
+            else: # mode == "add"
+                preview_caption = (
+                    f"📝 **ADDITION PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
+                    f"📁 Name: **{session['name']}**\n🆔 ID: `{session['album_id']}`\n{stats}"
+                    f"⏱ Session: ~{duration} min\n━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
+                )
+                builder = InlineKeyboardBuilder()
+                builder.row(
+                    types.InlineKeyboardButton(text="✅ Save Addition", callback_data="quick_save_add"),
+                    types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
+                )
+
+            first = next((i for i in session["photos"] if isinstance(i, dict) and i.get("type") != "text"), session["photos"][0])
+            fid = first["file_id"] if isinstance(first, dict) else first
+            mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
+
+            try:
+                if mtype == "text":
+                    await message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                elif mtype == "video":
+                    await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                elif mtype == "document":
+                    await bot.send_document(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                elif mtype == "audio":
+                    await bot.send_audio(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                elif mtype == "voice":
+                    await bot.send_voice(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                else:
+                    await bot.send_photo(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Preview send error: {e}")
                 try:
-                    await save_msg.edit_text(
-                        f"⏳ Uploading... {done}/{total}\n📁 {session['name']}",
-                        parse_mode="Markdown"
-                    )
-                except Exception:
-                    pass
+                    await message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                except Exception as e2:
+                    logger.error(f"Text fallback error: {e2}")
+                    await message.answer(f"❌ Preview error: {e}", parse_mode="Markdown")
+            return
 
-            saved_items = await process_and_save_items(session["photos"], progress_cb=_progress)
-            new_count = len(saved_items)
-            new_photos, new_videos, new_docs, new_audios = count_media(saved_items)
-            try:
-                await save_msg.edit_text(
-                    f"⏳ Uploading... {new_count}/{total_new}\n📁 {session['name']}",
-                    parse_mode="Markdown"
-                )
-            except: pass
+        elif mode == "dlt":
+            del user_sessions[uid]
+            return await message.answer("❌ Delete operation cancel.", parse_mode="Markdown")
 
-            await albums_col.update_one(
-                {"album_id": session["album_id"]},
-                {
-                    "$push": {"photos": {"$each": saved_items}, "history": {"action": "added", "count": new_count, "by": uid, "at": now_db()}},
-                    "$inc": {"count": new_count, "media_count.photos": new_photos, "media_count.videos": new_videos, "media_count.docs": new_docs, "media_count.audios": new_audios},
-                    "$set": {"updated_at": now_db()},
-                    "$addToSet": {"folders": {"$each": unique_folders_from_files(saved_items)}}
-                }
-            )
+    # Stop view session
+    if uid in view_sessions:
+        view_sessions[uid] = False
+        return await message.answer("⏹ View band kar diya!")
 
-            try:
-                await bot.send_message(STORAGE_CHANNEL,
-                    f"➕ **Files Added**\n📁 {session['name']} | 🆔 `{session['album_id']}`\n"
-                    f"🗂 +{new_count} files\n🕐 {now_ist().strftime('%d %b %Y, %I:%M %p')} IST",
-                    parse_mode="Markdown")
-            except: pass
-
-            await albums_col.update_one(
-                {"album_id": session["album_id"]},
-                {"$push": {"add_history": {"msg_id": add_msg_id, "count": new_count, "folder": get_session_folder(session), "at": now_db()}}}
-            )
-            await update_checklist()
-            try: await save_msg.delete()
-            except: pass
-            await message.answer(
-                f"✅ **Successfully Saved!**\n\n"
-                f"📁 Album: **{session['name']}**\n"
-                f"🆔 `{session['album_id']}`\n"
-                f"🗂 +{new_count} items added",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"close add-save error: {e}")
-            await message.answer("❌ Save error. Retry karein.")
-        del user_sessions[uid]
-        return
-
-    if uid not in user_sessions or user_sessions[uid].get("mode") != "create":
-        if uid in view_sessions:
-            view_sessions[uid] = False
-            return await message.answer("⏹ View band kar diya!")
-        return await message.answer("⚠️ Koi active session nahi hai.")
-    session = user_sessions[uid]
-    if not session["photos"]:
-        del user_sessions[uid]
-        return await message.answer("⚠️ Koi file nahi thi. Session cancel ho gaya.")
-    auto_id = f"ALB-{now_ist().strftime('%y%m%d%H%M')}"
-    duration = (now_db() - session["started_at"]).seconds // 60
-    photos, videos, docs, audios = count_media(session["photos"])
-    stats = ""
-    if photos: stats += f"📸 {photos} photos\n"
-    if videos: stats += f"🎥 {videos} videos\n"
-    if docs: stats += f"📄 {docs} documents\n"
-    if audios: stats += f"🎵 {audios} audio\n"
-    preview_caption = (
-        f"📝 **ALBUM PREVIEW**\n━━━━━━━━━━━━━━━━━━\n"
-        f"📁 Name: **{session['name']}**\n🆔 ID: `{auto_id}`\n{stats}"
-        f"━━━━━━━━━━━━━━━━━━\nSave karna chahte hain?"
-    )
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        types.InlineKeyboardButton(text="✅ Save Album", callback_data="confirm_save"),
-        types.InlineKeyboardButton(text="❌ Cancel", callback_data="confirm_cancel")
-    )
-    first = next((i for i in session["photos"] if isinstance(i, dict) and i.get("type") != "text"), session["photos"][0])
-    fid = first["file_id"] if isinstance(first, dict) else first
-    mtype = first.get("type", "photo") if isinstance(first, dict) else "photo"
-    try:
-        if mtype == "text":
-            await message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        elif mtype == "video":
-            await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        elif mtype == "document":
-            await bot.send_document(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        elif mtype == "audio":
-            await bot.send_audio(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        elif mtype == "voice":
-            await bot.send_voice(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        else:
-            await bot.send_photo(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Preview send error: {e}")
-        try:
-            await message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        except Exception as e2:
-            logger.error(f"Text fallback error: {e2}")
-            await message.answer(f"❌ Preview error: {e}", parse_mode="Markdown")
+    # Stop /b2 transmission
+    if uid in b2_cancel_flags:
+        return await message.answer("⛔ Stop signal already sent.")
+    b2_cancel_flags.add(uid)
+    await message.answer("⛔ Stop signal sent. Agar /b2 chal raha hai to ruk jayega.")
 
 
 # ============================================================
@@ -2689,27 +2635,7 @@ async def handle_text_and_password(message: types.Message):
         await cmd_zip(message, _password_ok=True)
 
 
-# ============================================================
-# /cancel
-# ============================================================
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message):
-    uid = message.from_user.id
-    password_pending.pop(uid, None)
-    if uid in user_sessions:
-        session = user_sessions[uid]
-        del user_sessions[uid]
-        b2_cancel_flags.add(uid)
-        await message.answer(
-            f"❌ **Session Cancel!**\nMode: {session.get('mode')} | Album: {session.get('name', '')}\n"
-            f"_{len(session.get('photos', []))} unsaved items discard ho gaye._",
-            parse_mode="Markdown"
-        )
-    else:
-        if uid in b2_cancel_flags:
-            return await message.answer("⛔ Stop signal already sent.")
-        b2_cancel_flags.add(uid)
-        await message.answer("⛔ Stop signal sent. Agar /b2 chal raha hai to ruk jayega.")
+
 
 
 # ============================================================

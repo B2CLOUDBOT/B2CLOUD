@@ -3178,6 +3178,59 @@ async def cmd_stats(message: types.Message):
     await message.answer(text, parse_mode="Markdown")
 
 
+# ============================================================
+# /bot
+# ============================================================
+@dp.message(Command("bot"))
+async def cmd_bot_guide(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Access Denied!")
+    
+    text = (
+        "🤖 *B2 CLOUD BOT - Features & Command Guide* 🤖\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "*✨ Major Features:*\n"
+        "1. **☁️ Personal Cloud Storage:** Apne Telegram channel ko data store karne ke liye scale pagination aur multi-sheet checklist ke sath manage karein.\n"
+        "2. **📁 Session Based Uploads:** `/album` ya `/add` command dekar active creation aur addition flows handle karein, safe confirmation preview screens ke sath save karein.\n"
+        "3. **📂 Folder Support:** Har album ke andar custom folders (directories) banayein aur `/cd` se subfolders switch karke clean storage organize karein.\n"
+        "4. **🔐 Password Protection:** Custom albums ko password lock lagayein taaki unauthorized users directly share (`/b2`), view (`/view`) ya zip export (`/zip`) na kar sakein.\n"
+        "5. **📦 Split Smart ZIP Exports:** Albums ko fast download karke max 18MB parts ki safe ZIP format me compress karke export karein, target limits automatic splits ke sath.\n"
+        "6. **🔎 Tokenized Search:** Tokens AND-match logic ke sath album tags, name aur descriptions me multi-word search karein.\n"
+        "7. **🕓 Auto-delete & Rate Limit Protection:** Private chat logs default 8-hour me automatic clean honge. User spamming par automatic active rate limiting protection wired hai.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "*🛠️ Bot Commands List & Work:*\n\n"
+        "• `/start` - Bot onboarding status aur entry.\n"
+        "• `/bot` - Bot features aur all commands guide details.\n"
+        "• `/album <album_name>` - Naya album creation session start karne ke liye.\n"
+        "• `/add <album_id/name>` - Mojuda album me naye files/text add karne ke liye.\n"
+        "• `/close` (ya `/cancel`) - Creation/addition session preview me save ya dismiss karne ke liye, ongoing view/delete/zip/b2 ko interrupt/cancel karne ke liye.\n"
+        "• `/albums` - Cloud ke saare albums ki list.\n"
+        "• `/recent` - Hal hi me update hue albums ki checklist (admin only).\n"
+        "• `/search <query>` - Tokenized multi-word tags, name aur file descriptions search ke liye.\n"
+        "• `/sort <name/size/files/date>` - Albums list custom ordering ke liye.\n"
+        "• `/stats` - Advanced total size, type distribution aur biggest albums report.\n"
+        "• `/view <album_id/name>` - Pure album content ko view aur save karne ke liye.\n"
+        "• `/viewfolder <album_id> <folder_name>` - Album ke andar kisi specific subfolder ke items view karne ke liye.\n"
+        "• `/zip <album_id/name>` - Smart splitting zip compiler run karne ke liye.\n"
+        "• `/b2 <album_id> <recipients>` - Album details direct specified users ko transfer karne ke liye.\n"
+        "• `/id` - Apni telegram profile info display karne ke liye.\n"
+        "• `/list` - Active granted users list aur b2 histories dekhne ke liye (owner only).\n"
+        "• `/mkdir <album_id> <folder>` - Album me subfolder banane ke liye.\n"
+        "• `/folders <album_id>` - Album ke folders list karne ke liye.\n"
+        "• `/cd <folder>` - Active session folder switch karne ke liye.\n"
+        "• `/setpass <album_id> <password>` - Album secure lock karne ke liye (owner only).\n"
+        "• `/removepass <album_id>` - Album password lock hatane ke liye (owner only).\n"
+        "• `/rename <album_id> <new_name>` - Album ka naam badalne ke liye.\n"
+        "• `/tag <album_id> #tag1 #tag2` - Album tags edit karne ke liye.\n"
+        "• `/grant <userid/@username>` - User ko bot use karne ka access dene ke liye (owner only).\n"
+        "• `/deny <userid/@username>` - User ka access block karne ke liye (owner only).\n"
+        "• `/makelist <title>` - Storage channel checklist update karne ke liye (owner only).\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "*(Apne private messages se sensitive data delete hone se bachane ke liye owner channel link direct refer karein.)*"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+
 @dp.message(Command("recent"))
 async def cmd_recent_updated(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -3325,6 +3378,7 @@ async def main():
         from aiogram.types import BotCommand
         commands = [
             BotCommand(command="start", description="Start bot onboarding"),
+            BotCommand(command="bot", description="View bot features and commands guide"),
             BotCommand(command="album", description="Create a new album"),
             BotCommand(command="add", description="Add files/text to an existing album"),
             BotCommand(command="albums", description="List all albums (admin only)"),

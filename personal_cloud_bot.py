@@ -28,7 +28,7 @@ def now_db():
 
 API_TOKEN = os.environ["API_TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
-AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "3600"))  # 1 hour
+AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "28800"))  # 8 hours
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 STORAGE_CHANNEL = int(os.environ["STORAGE_CHANNEL"])
 
@@ -41,34 +41,23 @@ dp = Dispatcher()
 async def auto_delete_message(chat_id: int, message_id: int, delay: int | None = None):
     if int(chat_id) == int(STORAGE_CHANNEL):
         return
-    await asyncio.sleep(AUTO_DELETE_AFTER_SEC if delay is None else delay)
+    sec = AUTO_DELETE_AFTER_SEC if delay is None else delay
+    if sec <= 0:
+        return
+    await asyncio.sleep(sec)
     try:
         await bot.delete_message(chat_id, message_id)
     except Exception:
         pass
 
-def patch_bot_auto_delete():
-    method_names = ["send_message", "send_photo", "send_video", "send_document", "send_audio", "send_voice"]
-
-    def make_wrapper(orig_func):
-        async def wrapper(*args, **kwargs):
-            msg = await orig_func(*args, **kwargs)
-            try:
-                chat_id = kwargs.get("chat_id")
-                if chat_id is None and args:
-                    chat_id = args[0]
-                if chat_id is None and hasattr(msg, "chat"):
-                    chat_id = msg.chat.id
-                if chat_id is not None and int(chat_id) != int(STORAGE_CHANNEL):
-                    asyncio.create_task(auto_delete_message(int(chat_id), msg.message_id))
-            except Exception:
-                pass
-            return msg
-        return wrapper
-
-    for method_name in method_names:
-        original = getattr(bot, method_name)
-        setattr(bot, method_name, make_wrapper(original))
+async def auto_delete_outgoing_middleware(make_request, bot, method):
+    result = await make_request(bot, method)
+    try:
+        if isinstance(result, types.Message) and int(result.chat.id) != int(STORAGE_CHANNEL):
+            asyncio.create_task(auto_delete_message(result.chat.id, result.message_id))
+    except Exception:
+        pass
+    return result
 
 class AutoDeleteIncomingMiddleware:
     async def __call__(self, handler, event, data):
@@ -79,7 +68,7 @@ class AutoDeleteIncomingMiddleware:
             pass
         return await handler(event, data)
 
-patch_bot_auto_delete()
+bot.session.middleware.register(auto_delete_outgoing_middleware)
 dp.message.middleware(AutoDeleteIncomingMiddleware())
 
 client = AsyncIOMotorClient(MONGO_URI)
@@ -164,6 +153,26 @@ async def find_album_strict(identifier: str):
             {"album_id": identifier}
         ]
     })
+
+async def parse_album_and_rest(raw_text: str) -> tuple[dict | None, str]:
+    raw = raw_text.strip()
+    album = None
+    rest = ""
+    m = re.match(r"^(ALB-\S+)(?:\s+(.+))?$", raw, re.IGNORECASE)
+    if m:
+        album = await find_album(m.group(1).strip())
+        if m.group(2):
+            rest = m.group(2).strip()
+    else:
+        tokens = raw.split()
+        for i in range(len(tokens), 0, -1):
+            cand = " ".join(tokens[:i])
+            alb_try = await find_album(cand)
+            if alb_try:
+                album = alb_try
+                rest = " ".join(tokens[i:]).strip()
+                break
+    return album, rest
 
 def auto_generate_tags(name: str) -> list:
     name_lower = name.lower().strip()
@@ -405,73 +414,167 @@ def ordinal(n: int) -> str:
     if 11 <= n % 100 <= 13: suffix = "th"
     return f"{n:02d}{suffix}"
 
-async def rebuild_checklist_text() -> str:
+async def rebuild_checklist_sheets() -> list[str]:
     setting = await db.settings.find_one({"key": "checklist_title"})
     title = setting["value"] if setting else "B2 CLOUD"
-    albums = await albums_col.find().sort("created_at", 1).to_list(200)
+    
+    albums = await albums_col.find().sort("created_at", 1).to_list(1000)
     ch_id = get_channel_id_for_link(STORAGE_CHANNEL)
-    lines = []
+    
+    groups = []
     for alb in albums:
-        name       = alb.get("name", "Unnamed")
-        msg_id     = alb.get("created_msg_id")
+        album_lines = []
+        name = alb.get("name", "Unnamed")
+        msg_id = alb.get("created_msg_id")
         add_history = alb.get("add_history", [])
         if msg_id:
             link = f"https://t.me/c/{ch_id}/{msg_id}"
-            lines.append(f"┃ ⚜ [{name}]({link})")
+            album_lines.append(f"┃ ⚜ [{name}]({link})")
         else:
-            lines.append(f"┃ ⚜ {name}")
+            album_lines.append(f"┃ ⚜ {name}")
+            
         for idx, entry in enumerate(add_history, 1):
             add_mid = entry.get("msg_id")
             folder_name = normalize_folder(entry.get("folder", "")) if entry.get("folder") else ""
             if add_mid:
                 add_link = f"https://t.me/c/{ch_id}/{add_mid}"
-                lines.append(f"┃       [{ordinal(idx)} Added]({add_link})")
+                album_lines.append(f"┃       [{ordinal(idx)} Added]({add_link})")
                 if folder_name and folder_name != "root":
-                    lines.append(f"┃          📂 [{folder_name}]({add_link})")
+                    album_lines.append(f"┃          📂 [{folder_name}]({add_link})")
             else:
-                lines.append(f"┃       {ordinal(idx)} Added")
+                album_lines.append(f"┃       {ordinal(idx)} Added")
                 if folder_name and folder_name != "root":
-                    lines.append(f"┃          📂 {folder_name}")
-    body = "\n┃\n".join(lines) if lines else "┃ _(koi album nahi)_"
-    text = (
+                    album_lines.append(f"┃          📂 {folder_name}")
+        groups.append(album_lines)
+        
+    sheets = []
+    current_lines = []
+    current_length = 0
+    
+    header_template = (
         f"┏━━━━━━━✦❘༻༺❘✦━━━━━━━┓\n"
-        f"┃     👑 {title} 👑\n"
+        f"┃     👑 {{title_with_sheet}} 👑\n"
         f"┃▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▰\n"
         f"┃\n"
-        f"{body}\n"
-        f"┃\n"
+    )
+    footer = (
+        f"\n┃\n"
         f"┃▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▰\n"
         f"┃\n"
         f"┗━━━━━━━✦❘༻༺❘✦━━━━━━━┛"
     )
-    return text
+    
+    base_len = len(header_template.format(title_with_sheet=title + " Sheet 99")) + len(footer) + 20
+    sheet_num = 1
+    
+    if not groups:
+        empty_body = "┃ _(koi album nahi)_"
+        text = header_template.format(title_with_sheet=title) + empty_body + footer
+        return [text]
+        
+    for grp in groups:
+        grp_text = "\n┃\n".join(grp)
+        if current_length + len(grp_text) + 5 > 3800:
+            if current_lines:
+                title_val = f"{title} - Sheet {sheet_num}" if sheet_num > 1 or len(groups) > 5 else title
+                body = "\n┃\n".join(current_lines)
+                sheets.append(header_template.format(title_with_sheet=title_val) + body + footer)
+                sheet_num += 1
+                current_lines = []
+                current_length = 0
+            
+            if len(grp_text) + base_len > 3800:
+                for line in grp:
+                    if current_length + len(line) + 5 > 3800:
+                        title_val = f"{title} - Sheet {sheet_num}"
+                        body = "\n┃\n".join(current_lines)
+                        sheets.append(header_template.format(title_with_sheet=title_val) + body + footer)
+                        sheet_num += 1
+                        current_lines = []
+                        current_length = 0
+                    current_lines.append(line)
+                    current_length += len(line) + 3
+                continue
+                
+        current_lines.extend(grp)
+        current_length += len(grp_text) + 3
+        
+    if current_lines:
+        title_val = f"{title} - Sheet {sheet_num}" if sheet_num > 1 else title
+        body = "\n┃\n".join(current_lines)
+        sheets.append(header_template.format(title_with_sheet=title_val) + body + footer)
+        
+    return sheets
 
 async def update_checklist():
-    new_text = await rebuild_checklist_text()
-    setting = await db.settings.find_one({"key": "checklist_msg_id"})
+    sheets = await rebuild_checklist_sheets()
+    
+    setting = await db.settings.find_one({"key": "checklist_msg_ids"})
+    msg_ids = []
     if setting:
-        msg_id = setting.get("value")
-        try:
-            await bot.edit_message_text(
-                chat_id=STORAGE_CHANNEL, message_id=msg_id, text=new_text,
-                parse_mode="Markdown", disable_web_page_preview=True
+        msg_ids = setting.get("value", [])
+    else:
+        old_setting = await db.settings.find_one({"key": "checklist_msg_id"})
+        if old_setting:
+            msg_ids = [old_setting.get("value")]
+            
+    new_msg_ids = []
+    
+    for idx, sheet_text in enumerate(sheets):
+        if idx < len(msg_ids):
+            msg_id = msg_ids[idx]
+            try:
+                await bot.edit_message_text(
+                    chat_id=STORAGE_CHANNEL, message_id=msg_id, text=sheet_text,
+                    parse_mode="Markdown", disable_web_page_preview=True
+                )
+                try:
+                    await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
+                except:
+                    pass
+                new_msg_ids.append(msg_id)
+            except Exception as e:
+                if "message is not modified" in str(e).lower():
+                    new_msg_ids.append(msg_id)
+                else:
+                    logger.warning(f"Checklist edit failed for msg {msg_id}: {e}, creating new message.")
+                    sent = await bot.send_message(
+                        STORAGE_CHANNEL, sheet_text, parse_mode="Markdown", disable_web_page_preview=True
+                    )
+                    try:
+                        await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+                    except:
+                        pass
+                    new_msg_ids.append(sent.message_id)
+        else:
+            sent = await bot.send_message(
+                STORAGE_CHANNEL, sheet_text, parse_mode="Markdown", disable_web_page_preview=True
             )
             try:
-                await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
-            except Exception:
+                await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
+            except:
                 pass
-            return msg_id
-        except Exception as e:
-            if "message is not modified" in str(e).lower():
-                return msg_id
-            logger.warning(f"Checklist edit failed, creating new checklist: {e}")
-    sent = await bot.send_message(STORAGE_CHANNEL, new_text, parse_mode="Markdown", disable_web_page_preview=True)
-    try:
-        await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
-    except Exception:
-        pass
-    await db.settings.update_one({"key": "checklist_msg_id"}, {"$set": {"key": "checklist_msg_id", "value": sent.message_id}}, upsert=True)
-    return sent.message_id
+            new_msg_ids.append(sent.message_id)
+            
+    if len(msg_ids) > len(sheets):
+        for old_msg_id in msg_ids[len(sheets):]:
+            try:
+                await bot.delete_message(STORAGE_CHANNEL, old_msg_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete extra checklist message {old_msg_id}: {e}")
+                
+    await db.settings.update_one(
+        {"key": "checklist_msg_ids"},
+        {"$set": {"key": "checklist_msg_ids", "value": new_msg_ids}},
+        upsert=True
+    )
+    if new_msg_ids:
+        await db.settings.update_one(
+            {"key": "checklist_msg_id"},
+            {"$set": {"key": "checklist_msg_id", "value": new_msg_ids[0]}},
+            upsert=True
+        )
+    return new_msg_ids
 
 
 # ============================================================
@@ -661,6 +764,7 @@ async def cmd_album(message: types.Message):
             parse_mode="Markdown"
         )
 
+    password_pending.pop(message.from_user.id, None)
     user_sessions[message.from_user.id] = {
         "mode": "create", "name": name,
         "photos": [], "ids": set(), "started_at": now_db(),
@@ -775,11 +879,19 @@ async def quick_close(callback: types.CallbackQuery):
             await bot.send_video(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         elif mtype == "document":
             await bot.send_document(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "audio":
+            await bot.send_audio(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "voice":
+            await bot.send_voice(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         else:
             await bot.send_photo(callback.message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    except TelegramBadRequest as e:
+    except Exception as e:
         logger.error(f"Preview error: {e}")
-        await callback.message.answer("❌ Preview generate nahi ho saca.")
+        try:
+            await callback.message.answer(preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        except Exception as e2:
+            logger.error(f"Text fallback error in quick_close: {e2}")
+            await callback.message.answer("❌ Preview generate nahi ho saca.")
 
 @dp.callback_query(F.data == "quick_save_add")
 async def quick_save_add_cb(callback: types.CallbackQuery):
@@ -787,9 +899,12 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
     uid = callback.from_user.id
     if uid not in user_sessions or user_sessions[uid]["mode"] != "add":
         return await callback.message.answer("⚠️ Koi active add session nahi hai.")
-    session = user_sessions[uid]
+    session = user_sessions.pop(uid)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except: pass
+
     if not session["photos"]:
-        del user_sessions[uid]
         return await callback.message.answer("⚠️ Koi file nahi bheji.")
     new_count = len(session["photos"])
     new_photos, new_videos, new_docs, new_audios = count_media(session["photos"])
@@ -829,7 +944,6 @@ async def quick_save_add_cb(callback: types.CallbackQuery):
     )
     await update_checklist()
     await callback.message.answer(f"✅ **+{new_count} items** add ho gaye!\n📁 **{session['name']}**", parse_mode="Markdown")
-    del user_sessions[uid]
 
 @dp.callback_query(F.data == "quick_cancel")
 async def quick_cancel_cb(callback: types.CallbackQuery):
@@ -997,6 +1111,10 @@ async def cmd_close(message: types.Message):
             await bot.send_video(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         elif mtype == "document":
             await bot.send_document(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "audio":
+            await bot.send_audio(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        elif mtype == "voice":
+            await bot.send_voice(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
         else:
             await bot.send_photo(message.chat.id, fid, caption=preview_caption, reply_markup=builder.as_markup(), parse_mode="Markdown")
     except Exception as e:
@@ -1156,25 +1274,8 @@ async def cmd_add(message: types.Message):
         return await message.answer("❌ Usage: `/add AlbumName` ya `/add ALB-xxx FolderName`", parse_mode="Markdown")
 
     raw = args[1].strip()
-    album = None
-    folder = "root"
-
-    m = re.match(r"^(ALB-\S+)(?:\s+(.+))?$", raw, re.IGNORECASE)
-    if m:
-        album = await find_album(m.group(1).strip())
-        if m.group(2):
-            folder = normalize_folder(m.group(2))
-    else:
-        tokens = raw.split()
-        for i in range(len(tokens), 0, -1):
-            cand = " ".join(tokens[:i])
-            alb_try = await find_album(cand)
-            if alb_try:
-                album = alb_try
-                rest = " ".join(tokens[i:]).strip()
-                if rest:
-                    folder = normalize_folder(rest)
-                break
+    album, rest = await parse_album_and_rest(raw)
+    folder = normalize_folder(rest) if rest else "root"
 
     if not album:
         return await message.answer(f"❌ **'{raw}'** nahi mila.", parse_mode="Markdown")
@@ -1187,6 +1288,7 @@ async def cmd_add(message: types.Message):
     if message.from_user.id in user_sessions:
         del user_sessions[message.from_user.id]
 
+    password_pending.pop(message.from_user.id, None)
     user_sessions[message.from_user.id] = {
         "mode": "add", "db_id": album["_id"],
         "album_id": album["album_id"], "name": album["name"],
@@ -1337,7 +1439,7 @@ async def cmd_rename(message: types.Message):
         return await message.answer("❌ Naya naam dein.", parse_mode="Markdown")
     conflict = await albums_col.find_one({"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}})
     if conflict: return await message.answer(f"⚠️ **'{new_name}'** already exists!", parse_mode="Markdown")
-    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"name": new_name, "updated_at": now_db()}})
+    await albums_col.update_one({"_id": album["_id"]}, {"$set": {"name": new_name, "tags": auto_generate_tags(new_name), "updated_at": now_db()}})
     await update_checklist()
     await message.answer(f"📝 **{album['name']}** → **{new_name}**", parse_mode="Markdown")
 
@@ -1610,25 +1712,43 @@ async def cmd_tag(message: types.Message):
 async def cmd_list(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     try:
-        albums = await albums_col.find().sort([("pinned", -1), ("created_at", -1)]).to_list(length=50)
+        albums = await albums_col.find().sort([("pinned", -1), ("created_at", -1)]).to_list(length=500)
         if not albums:
             return await message.answer("📂 Cloud empty hai! /album se banayein.")
         total_files = sum(a.get("count", 0) for a in albums)
         locked_count = sum(1 for a in albums if a.get("locked"))
-        lines = (
+        
+        header = (
             f"☁️ *Personal Cloud*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📊 {len(albums)} albums  🗂 {total_files} files  🔒 {locked_count} locked\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
         )
+        
+        messages = []
+        current_msg = header
+        
         for alb in albums:
             icon = "🔒" if alb.get("locked") else "📁"
             if alb.get("pinned"):
                 icon = "📌" + icon
             aid  = alb.get("album_id") or "N/A"
             name = alb.get("name") or "Unnamed"
-            lines += f"{icon} {name}\n🆔 `{aid}`\n\n"
-        await message.answer(lines.strip(), parse_mode="Markdown")
+            line = f"{icon} {name}\n🆔 `{aid}`\n\n"
+            
+            if len(current_msg) + len(line) > 4000:
+                messages.append(current_msg.strip())
+                current_msg = ""
+            
+            current_msg += line
+            
+        if current_msg:
+            messages.append(current_msg.strip())
+            
+        for msg_text in messages:
+            await message.answer(msg_text, parse_mode="Markdown")
+            await asyncio.sleep(0.2)
+            
     except Exception as e:
         logger.error(f"/albums error: {e}")
         await message.answer(f"❌ Error: {e}")
@@ -1732,20 +1852,23 @@ async def cmd_mkdir(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
 
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         return await message.answer(
             "❌ Usage:\n`/mkdir <album name/id> <folder name>`\n\nExample: `/mkdir ALB-xxx Physics`",
             parse_mode="Markdown"
         )
 
-    album = await find_album(args[1].strip())
-    if not album:
-        return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+    album, rest = await parse_album_and_rest(args[1])
+    if not album or not rest:
+        return await message.answer(
+            "❌ Usage:\n`/mkdir <album name/id> <folder name>`\n\nExample: `/mkdir ALB-xxx Physics`",
+            parse_mode="Markdown"
+        )
     if album.get("locked"):
         return await message.answer("🔒 Album locked hai!", parse_mode="Markdown")
 
-    folder = normalize_folder(args[2])
+    folder = normalize_folder(rest)
     await albums_col.update_one(
         {"_id": album["_id"]},
         {"$addToSet": {"folders": folder}, "$set": {"updated_at": now_db()}}
@@ -1800,24 +1923,27 @@ async def cmd_viewfolder(message: types.Message, _password_ok: bool = False):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
 
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         return await message.answer(
             "❌ Usage: `/viewfolder <album name/id> <folder>`",
             parse_mode="Markdown"
         )
 
-    album = await find_album(args[1].strip())
-    if not album:
-        return await message.answer("❌ Album nahi mila.", parse_mode="Markdown")
+    album, rest = await parse_album_and_rest(args[1])
+    if not album or not rest:
+        return await message.answer(
+            "❌ Usage: `/viewfolder <album name/id> <folder>`",
+            parse_mode="Markdown"
+        )
 
     uid = message.from_user.id
     album_pass = album.get("password")
+    folder = normalize_folder(rest)
     if album_pass and not is_owner(uid) and not _password_ok:
-        password_pending[uid] = {"action": "viewfolder", "album": album, "folder": normalize_folder(args[2])}
+        password_pending[uid] = {"action": "viewfolder", "album": album, "folder": folder}
         return await message.answer(f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:", parse_mode="Markdown")
 
-    folder = normalize_folder(args[2])
     files = [f for f in album.get("photos", []) if isinstance(f, dict) and normalize_folder(f.get("folder", "root")) == folder]
     if not files:
         return await message.answer(f"📂 Folder empty hai: `{folder}`", parse_mode="Markdown")
@@ -2434,60 +2560,15 @@ async def cmd_makelist(message: types.Message):
         upsert=True
     )
 
-    checklist_text = await rebuild_checklist_text()
-    existing = await db.settings.find_one({"key": "checklist_msg_id"})
-
-    if existing:
-        msg_id = existing["value"]
-        try:
-            await bot.edit_message_text(
-                chat_id=STORAGE_CHANNEL,
-                message_id=msg_id,
-                text=checklist_text,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-            try:
-                await bot.pin_chat_message(STORAGE_CHANNEL, msg_id, disable_notification=True)
-            except:
-                pass
-
-            return await message.answer(
-                f"✅ Checklist same message me update ho gaya!\n🆔 `{msg_id}`",
-                parse_mode="Markdown"
-            )
-
-        except Exception as e:
-            return await message.answer(
-                f"❌ Old checklist edit nahi hua.\n"
-                f"Old Message ID: `{msg_id}`\n\n"
-                f"Reason: `{e}`\n\n"
-                f"New checklist create nahi kiya, taki spam na ho.",
-                parse_mode="Markdown"
-            )
-
-    sent = await bot.send_message(
-        STORAGE_CHANNEL,
-        checklist_text,
-        parse_mode="Markdown",
-        disable_web_page_preview=True
-    )
-
     try:
-        await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
-    except:
-        pass
-
-    await db.settings.update_one(
-        {"key": "checklist_msg_id"},
-        {"$set": {"key": "checklist_msg_id", "value": sent.message_id}},
-        upsert=True
-    )
-
-    await message.answer(
-        f"✅ Checklist create ho gaya!\n📌 Pinned\n🆔 `{sent.message_id}`",
-        parse_mode="Markdown"
-    )
+        new_ids = await update_checklist()
+        await message.answer(
+            f"✅ Checklist successfully updated/created!\n📌 Pinned {len(new_ids)} sheet(s)\n🆔 IDs: `{new_ids}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"makelist command error: {e}")
+        await message.answer(f"❌ Error updating checklist: `{e}`", parse_mode="Markdown")
 
 # ============================================================
 # /setpass  &  /removepass
@@ -2495,16 +2576,19 @@ async def cmd_makelist(message: types.Message):
 @dp.message(Command("setpass"))
 async def cmd_setpass(message: types.Message):
     if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         return await message.answer(
             "❌ Usage: `/setpass <album name/id> <password>`",
             parse_mode="Markdown"
         )
-    identifier = args[1].strip()
-    password   = args[2].strip()
-    album = await find_album(identifier)
-    if not album: return await message.answer(f"❌ Album '{identifier}' nahi mila.", parse_mode="Markdown")
+    album, rest = await parse_album_and_rest(args[1])
+    if not album or not rest:
+        return await message.answer(
+            "❌ Usage: `/setpass <album name/id> <password>`",
+            parse_mode="Markdown"
+        )
+    password = rest.strip()
     await albums_col.update_one({"_id": album["_id"]}, {"$set": {"password": password, "updated_at": now_db()}})
     await message.answer(
         f"🔐 Password set!\n📁 **{album['name']}**\n🔑 `{password}`",
@@ -2611,6 +2695,7 @@ async def handle_text_and_password(message: types.Message):
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message):
     uid = message.from_user.id
+    password_pending.pop(uid, None)
     if uid in user_sessions:
         session = user_sessions[uid]
         del user_sessions[uid]

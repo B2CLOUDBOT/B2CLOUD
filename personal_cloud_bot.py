@@ -2080,6 +2080,7 @@ async def view_shortcut(message: types.Message):
 
 @dp.message(Command("view"))
 async def view_by_id(message: types.Message, _password_ok: bool = False):
+    # Route command input details to the perform_view helper
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2087,6 +2088,7 @@ async def view_by_id(message: types.Message, _password_ok: bool = False):
     await perform_view(message.chat.id, message.from_user.id, args[1].strip(), _password_ok)
 
 async def perform_view(chat_id: int, user_id: int, identifier: str, _password_ok: bool = False):
+    # Route 1: If input matches tags (starts with '#'), query and display all albums tagged with it
     tags_input = [w.lower() for w in identifier.split() if w.startswith("#")]
     if tags_input:
         query_conditions = []
@@ -2108,10 +2110,12 @@ async def perform_view(chat_id: int, user_id: int, identifier: str, _password_ok
             await asyncio.sleep(0.05)
         return
 
+    # Route 2: Query for a specific album by its ID or Name
     album = await find_album(identifier)
     if not album:
         return await bot.send_message(chat_id, f"❌ Album '{identifier}' nahi mila.")
 
+    # Password Protection Check: Only owners can view password-protected albums without a password
     album_pass = album.get("password")
     if album_pass and not is_owner(user_id) and not _password_ok:
         password_pending[user_id] = {"action": "view", "album": album}
@@ -2121,6 +2125,7 @@ async def perform_view(chat_id: int, user_id: int, identifier: str, _password_ok
             parse_mode="Markdown"
         )
 
+    # Format the media preview message header
     mc = album.get("media_count", {})
     p = mc.get("photos",0); v = mc.get("videos",0)
     d = mc.get("docs",0);   a = mc.get("audios",0)
@@ -2135,10 +2140,14 @@ async def perform_view(chat_id: int, user_id: int, identifier: str, _password_ok
         f"📂 {md(album['name'])}\n🆔 {album['album_id']}\n🗂 {type_str}\nLoading...\n\n⏹ Rokna ho toh `/close` likhein",
         parse_mode="Markdown"
     )
+    # Start a view session which allows cancellation via /close
     view_sessions[user_id] = True
     files = album.get("photos", [])
     sent = failed = 0
+    
+    # Send files one by one
     for item in files:
+        # Check if user cancelled the viewing session
         if not view_sessions.get(user_id):
             await bot.send_message(chat_id, f"⏹ View band kar diya.\n✅ {sent} files bhej chuke the.")
             return
@@ -2146,6 +2155,7 @@ async def perform_view(chat_id: int, user_id: int, identifier: str, _password_ok
         mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
         channel_msg_id = item.get("channel_msg_id") or item.get("storage_msg_id") if isinstance(item, dict) else None
         try:
+            # Route and send according to media type
             if mtype == "text":
                 text_val = item.get("text", "") if isinstance(item, dict) else ""
                 await bot.send_message(chat_id, text_val)
@@ -2526,8 +2536,11 @@ async def cmd_stats_old(message: types.Message):
 # ============================================================
 @dp.message(Command("b2"))
 async def cmd_b2(message: types.Message, _password_ok: bool = False):
+    # Check if the user has admin rights
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
+    
+    # Parse album identifier and recipient list from message arguments
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         return await message.answer("❌ Usage: `/b2 <id/name> @u1 @u2` ya `/b2 <id/name> userid`", parse_mode="Markdown")
@@ -2536,6 +2549,7 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     if len(tokens) < 2:
         return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
     targets_raw = []
+    # Recipients can be username starting with '@' or numerical user ID
     while tokens and (tokens[-1].startswith("@") or tokens[-1].lstrip("-").isdigit()):
         targets_raw.insert(0, tokens.pop())
     album_identifier = " ".join(tokens).strip()
@@ -2544,13 +2558,17 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     if not targets_raw:
         return await message.answer("❌ Recipient (@user ya userid) dein.", parse_mode="Markdown")
 
+    # Locate album in database
     album = await find_album(album_identifier)
     if not album:
         return await message.answer(f"❌ Album '{album_identifier}' nahi mila.", parse_mode="Markdown")
         
+    # Security Validation: Check if the album is password-protected.
+    # Non-owner admins must enter the password to share the album files.
     uid = message.from_user.id
     album_pass = album.get("password")
     if album_pass and not is_owner(uid) and not _password_ok:
+        # Save state so that the next message is evaluated as the password for this b2 action
         password_pending[uid] = {"action": "b2", "album": album, "targets": targets_raw}
         return await message.answer(
             f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:",

@@ -6,7 +6,7 @@ import aiohttp
 import os
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,7 +16,36 @@ from aiogram.exceptions import TelegramBadRequest
 from keep_alive import start_server
 
 # ============================================================
-# CONFIGURATION
+# DOTENV & LOGGING SETUP
+# ============================================================
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Custom Logger setup with console + file handler
+logger = logging.getLogger("personal_cloud_bot")
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+# Console handler
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch.setFormatter(formatter)
+logger.addHandler(ch)
+
+# File handler
+try:
+    fh = logging.FileHandler("bot.log", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+except Exception as e:
+    logger.warning(f"Could not setup FileHandler: {e}")
+
+# ============================================================
+# CONFIGURATION & ENV VALIDATION
 # ============================================================
 IST = ZoneInfo('Asia/Kolkata')
 
@@ -26,17 +55,36 @@ def now_ist():
 def now_db():
     return datetime.now()
 
-API_TOKEN = os.environ["API_TOKEN"]
-MONGO_URI = os.environ["MONGO_URI"]
-AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "28800"))  # 8 hours
-ADMIN_ID = int(os.environ["ADMIN_ID"])
-STORAGE_CHANNEL = int(os.environ["STORAGE_CHANNEL"])
+# Validate crucial variables
+try:
+    API_TOKEN = os.environ["API_TOKEN"]
+    MONGO_URI = os.environ["MONGO_URI"]
+except KeyError as e:
+    logger.error(f"CRITICAL: Missing environment variable {e}")
+    import sys
+    sys.exit(1)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+try:
+    ADMIN_ID = int(os.environ["ADMIN_ID"])
+except (KeyError, ValueError) as e:
+    logger.error(f"CRITICAL: ADMIN_ID env var must be an integer: {e}")
+    import sys
+    sys.exit(1)
+
+try:
+    STORAGE_CHANNEL = int(os.environ["STORAGE_CHANNEL"])
+except (KeyError, ValueError) as e:
+    logger.error(f"CRITICAL: STORAGE_CHANNEL env var must be an integer: {e}")
+    import sys
+    sys.exit(1)
+
+AUTO_DELETE_AFTER_SEC = int(os.environ.get("AUTO_DELETE_AFTER_SEC", "28800"))  # 8 hours
+CHECKLIST_MAX_ALBUMS = int(os.environ.get("CHECKLIST_MAX_ALBUMS", "0"))
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
+
+_background_tasks = set()
 
 async def auto_delete_message(chat_id: int, message_id: int, delay: int | None = None):
     if int(chat_id) == int(STORAGE_CHANNEL):
@@ -54,7 +102,9 @@ async def auto_delete_outgoing_middleware(make_request, bot, method):
     result = await make_request(bot, method)
     try:
         if isinstance(result, types.Message) and int(result.chat.id) != int(STORAGE_CHANNEL):
-            asyncio.create_task(auto_delete_message(result.chat.id, result.message_id))
+            task = asyncio.create_task(auto_delete_message(result.chat.id, result.message_id))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
     except Exception:
         pass
     return result
@@ -63,7 +113,9 @@ class AutoDeleteIncomingMiddleware:
     async def __call__(self, handler, event, data):
         try:
             if isinstance(event, types.Message) and int(event.chat.id) != int(STORAGE_CHANNEL):
-                asyncio.create_task(auto_delete_message(event.chat.id, event.message_id))
+                task = asyncio.create_task(auto_delete_message(event.chat.id, event.message_id))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
         except Exception:
             pass
         return await handler(event, data)
@@ -71,7 +123,7 @@ class AutoDeleteIncomingMiddleware:
 bot.session.middleware.register(auto_delete_outgoing_middleware)
 dp.message.middleware(AutoDeleteIncomingMiddleware())
 
-client = AsyncIOMotorClient(MONGO_URI)
+client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=8000)
 db = client.personal_cloud_db
 albums_col = db.albums
 b2_history_col = db.b2_history
@@ -90,25 +142,44 @@ rate_cache = defaultdict(list)
 MAX_UPLOAD_PER_MIN = int(os.environ.get("MAX_UPLOAD_PER_MIN", "99999"))
 SESSION_TIMEOUT_MIN = int(os.environ.get("SESSION_TIMEOUT_MIN", "99999"))
 
+from pymongo import ReturnDocument
+
 # ── Registration code generator ──────────────────────────────
 async def get_or_create_reg_code(uid: int) -> str:
     existing = await db.reg_codes.find_one({"user_id": uid})
     if existing:
         return existing["code"]
-    count = await db.reg_codes.count_documents({})
+        
+    counter_doc = await db.settings.find_one_and_update(
+        {"key": "reg_code_counter"},
+        {"$inc": {"value": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
+    count = counter_doc["value"] - 1  # 0-indexed count
+    
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     digits  = "123456789"
     total   = len(letters) * len(digits)
+    import random
+    
     if count < total:
         l = letters[count // len(digits)]
         d = digits[count % len(digits)]
         code = f"{l}{d}"
-    else:
+    elif count < total + (len(letters) * len(letters) * len(digits)):
         count2 = count - total
-        l1 = letters[(count2 // (len(letters) * len(digits)))]
-        l2 = letters[(count2 // len(digits)) % len(letters)]
-        d  = digits[count2 % len(digits)]
-        code = f"{l1}{l2}{d}"
+        l1_idx = (count2 // (len(letters) * len(digits)))
+        l2_idx = ((count2 // len(digits)) % len(letters))
+        d_idx  = (count2 % len(digits))
+        if l1_idx < len(letters) and l2_idx < len(letters) and d_idx < len(digits):
+            code = f"{letters[l1_idx]}{letters[l2_idx]}{digits[d_idx]}"
+        else:
+            code = "".join(random.choices(letters, k=3)) + "".join(random.choices(digits, k=2))
+    else:
+        # Fallback random code if exhausted
+        code = "".join(random.choices(letters, k=3)) + "".join(random.choices(digits, k=2))
+        
     await db.reg_codes.insert_one({"user_id": uid, "code": code, "created_at": now_db()})
     return code
 
@@ -133,17 +204,37 @@ async def find_album(identifier: str):
         })
         if result:
             return result
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Exact match find_album check failed: {e}")
     try:
-        result = await albums_col.find_one({
+        cursor = albums_col.find({
             "name": {"$regex": re.escape(identifier), "$options": "i"}
         })
-        if result:
-            return result
-    except Exception:
-        pass
+        candidates = await cursor.to_list(length=50)
+        if candidates:
+            if len(candidates) > 1:
+                logger.warning(f"Multiple album matches found for '{identifier}': {[c.get('name') for c in candidates]}. Selecting closest match.")
+            candidates.sort(key=lambda x: len(x.get("name", "")))
+            return candidates[0]
+    except Exception as e:
+        logger.debug(f"Partial match find_album check failed: {e}")
     return None
+
+async def find_album_multi(identifier: str) -> list[dict]:
+    identifier = identifier.strip()
+    if not identifier:
+        return []
+    if identifier.upper().startswith("ALB-"):
+        result = await albums_col.find_one({"album_id": identifier.upper()})
+        return [result] if result else []
+    try:
+        cursor = albums_col.find({
+            "name": {"$regex": re.escape(identifier), "$options": "i"}
+        })
+        return await cursor.to_list(length=50)
+    except Exception as e:
+        logger.debug(f"find_album_multi error: {e}")
+        return []
 
 async def find_album_strict(identifier: str):
     identifier = identifier.strip()
@@ -192,6 +283,7 @@ def auto_generate_tags(name: str) -> list:
 
 def md(text: str) -> str:
     if not text: return ""
+    text = text.replace('\\', '\\\\')
     for ch in ['_', '*', '[', ']', '`']:
         text = text.replace(ch, '\\' + ch)
     return text
@@ -205,7 +297,8 @@ def safe_ist(dt) -> str:
             from datetime import timezone
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(IST).strftime("%d %b %Y, %I:%M %p") + " IST"
-    except:
+    except Exception as e:
+        logger.debug(f"safe_ist error: {e}")
         return str(dt)
 
 
@@ -418,7 +511,8 @@ async def rebuild_checklist_sheets() -> list[str]:
     setting = await db.settings.find_one({"key": "checklist_title"})
     title = setting["value"] if setting else "B2 CLOUD"
     
-    albums = await albums_col.find().sort("created_at", 1).to_list(1000)
+    limit = CHECKLIST_MAX_ALBUMS if CHECKLIST_MAX_ALBUMS > 0 else 5000
+    albums = await albums_col.find().sort("created_at", 1).to_list(limit)
     ch_id = get_channel_id_for_link(STORAGE_CHANNEL)
     
     groups = []
@@ -534,22 +628,45 @@ async def update_checklist():
                     pass
                 new_msg_ids.append(msg_id)
             except Exception as e:
-                if "message is not modified" in str(e).lower():
+                err_str = str(e).lower()
+                if "message is not modified" in err_str:
                     new_msg_ids.append(msg_id)
+                elif "can't parse" in err_str or "entity" in err_str:
+                    logger.warning(f"Checklist edit markdown parsing failed for msg {msg_id}: {e}. Retrying as plain text.")
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=STORAGE_CHANNEL, message_id=msg_id, text=sheet_text,
+                            disable_web_page_preview=True
+                        )
+                        new_msg_ids.append(msg_id)
+                    except Exception as fallback_e:
+                        logger.error(f"Checklist edit plain-text fallback failed: {fallback_e}")
                 else:
                     logger.warning(f"Checklist edit failed for msg {msg_id}: {e}, creating new message.")
-                    sent = await bot.send_message(
-                        STORAGE_CHANNEL, sheet_text, parse_mode="Markdown", disable_web_page_preview=True
-                    )
+                    try:
+                        sent = await bot.send_message(
+                            STORAGE_CHANNEL, sheet_text, parse_mode="Markdown", disable_web_page_preview=True
+                        )
+                    except Exception as send_err:
+                        logger.warning(f"Checklist send markdown failed: {send_err}. Retrying as plain text.")
+                        sent = await bot.send_message(
+                            STORAGE_CHANNEL, sheet_text, disable_web_page_preview=True
+                        )
                     try:
                         await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
                     except:
                         pass
                     new_msg_ids.append(sent.message_id)
         else:
-            sent = await bot.send_message(
-                STORAGE_CHANNEL, sheet_text, parse_mode="Markdown", disable_web_page_preview=True
-            )
+            try:
+                sent = await bot.send_message(
+                    STORAGE_CHANNEL, sheet_text, parse_mode="Markdown", disable_web_page_preview=True
+                )
+            except Exception as send_err:
+                logger.warning(f"Checklist send markdown failed: {send_err}. Retrying as plain text.")
+                sent = await bot.send_message(
+                    STORAGE_CHANNEL, sheet_text, disable_web_page_preview=True
+                )
             try:
                 await bot.pin_chat_message(STORAGE_CHANNEL, sent.message_id, disable_notification=True)
             except:
@@ -581,39 +698,52 @@ async def update_checklist():
 # process_and_save_items — with progress callback
 # ============================================================
 async def process_and_save_items(session_photos: list, progress_cb=None) -> list:
-    saved_items = []
-    total = len(session_photos)
-    for idx, item in enumerate(sort_session_items(session_photos), 1):
-        fid   = item["file_id"] if isinstance(item, dict) else item
-        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+    async with album_save_lock:
+        saved_items = []
+        total = len(session_photos)
+        failed_count = 0
+        for idx, item in enumerate(sort_session_items(session_photos), 1):
+            fid   = item["file_id"] if isinstance(item, dict) else item
+            mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
 
-        if mtype == "text":
-            text_val = item.get("text", "")
-            mid, _ = await send_to_storage("", "text", text_val)
-            new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
-            new_item["folder"] = normalize_folder(item.get("folder", "root")) if isinstance(item, dict) else "root"
-            new_item["order"] = item.get("order", 0) if isinstance(item, dict) else 0
-            new_item["message_id"] = item.get("message_id", 0) if isinstance(item, dict) else 0
-            new_item["sig"] = file_signature(new_item)
-            if mid: new_item["storage_msg_id"] = mid
-            saved_items.append(new_item)
-        else:
-            mid, fsize = await send_to_storage(fid, mtype)
-            new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
-            if mid: new_item["storage_msg_id"] = mid
-            if fsize: new_item["file_size"] = fsize
-            new_item["sig"] = file_signature(new_item)
-            saved_items.append(new_item)
+            if mtype == "text":
+                text_val = item.get("text", "")
+                mid, _ = await send_to_storage("", "text", text_val)
+                new_item = {"file_id": "", "type": "text", "text": text_val, "name": ""}
+                new_item["folder"] = normalize_folder(item.get("folder", "root")) if isinstance(item, dict) else "root"
+                new_item["order"] = item.get("order", 0) if isinstance(item, dict) else 0
+                new_item["message_id"] = item.get("message_id", 0) if isinstance(item, dict) else 0
+                new_item["sig"] = file_signature(new_item)
+                if mid: 
+                    new_item["storage_msg_id"] = mid
+                else:
+                    new_item["storage_failed"] = True
+                    failed_count += 1
+                saved_items.append(new_item)
+                await asyncio.sleep(0.05)
+            else:
+                mid, fsize = await send_to_storage(fid, mtype)
+                new_item = dict(item) if isinstance(item, dict) else {"file_id": fid, "type": mtype, "name": ""}
+                if mid: 
+                    new_item["storage_msg_id"] = mid
+                else:
+                    new_item["storage_failed"] = True
+                    failed_count += 1
+                    logger.warning(f"Media save failed for {mtype} with file_id: {fid}")
+                if fsize: new_item["file_size"] = fsize
+                new_item["sig"] = file_signature(new_item)
+                saved_items.append(new_item)
+                await asyncio.sleep(0.2)
 
-        # Progress update every 10 files
-        if progress_cb and idx % 10 == 0:
-            try:
-                await progress_cb(idx, total)
-            except Exception:
-                pass
+            if progress_cb and idx % 10 == 0:
+                try:
+                    await progress_cb(idx, total)
+                except Exception:
+                    pass
 
-        await asyncio.sleep(0.2)
-    return saved_items
+        if failed_count > 0:
+            logger.warning(f"Completed process_and_save_items: {failed_count} of {total} items failed to save to storage channel.")
+        return saved_items
 
 
 # ============================================================
@@ -655,18 +785,26 @@ async def cmd_start(message: types.Message):
         user = message.from_user
         uname = f"@{user.username}" if user.username else "N/A"
         grant_str = f"@{user.username}" if user.username else str(uid)
-        await bot.send_message(
-            ADMIN_ID,
-            f"👤 {user.full_name} /start\n"
+        escaped_name = md(user.full_name or "Unknown")
+        escaped_uname = md(uname or "N/A")
+        admin_text = (
+            f"👤 {escaped_name} /start\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🎫 Code: *{reg_code}*\n"
             f"🆔 User ID: `{uid}`\n"
-            f"📛 Name: {user.full_name}\n"
-            f"🔗 Username: {uname}\n"
+            f"📛 Name: {escaped_name}\n"
+            f"🔗 Username: {escaped_uname}\n"
             f"📊 Status: {emoji_status}\n"
-            f"✅ Access: `/grant {grant_str}`",
-            parse_mode="Markdown"
+            f"✅ Access: `/grant {grant_str}`"
         )
+        try:
+            await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
+        except Exception as admin_err:
+            logger.warning(f"Failed to send admin onboarding notification in Markdown: {admin_err}. Trying plain text.")
+            try:
+                await bot.send_message(ADMIN_ID, admin_text)
+            except Exception as admin_err_fallback:
+                logger.error(f"Failed to send admin onboarding notification in plain text: {admin_err_fallback}")
         await message.answer(
             f"☁️ *Personal Cloud Bot*\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -785,6 +923,8 @@ async def cmd_album(message: types.Message):
 # ============================================================
 async def _handle_media(message: types.Message, file_id: str, unique_id: str, media_type: str, fname: str = "", file_size: int = 0):
     uid = message.from_user.id
+    if not check_rate_limit(uid):
+        return await message.reply("⚠️ Rate limit reached. Thoda wait karke upload karein.")
     if await cleanup_expired_session(uid):
         return await message.answer("⏰ Session timeout ho gaya. Dobara /album ya /add start karo.")
     ok, limit_msg = await storage_limit_ok(file_size)

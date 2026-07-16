@@ -1124,7 +1124,7 @@ async def warn_save_first(callback: types.CallbackQuery):
 # ============================================================
 # /close
 # ============================================================
-@dp.message(Command("close", "cancel"))
+@dp.message(Command("close"))
 async def cmd_close(message: types.Message):
     uid = message.from_user.id
     password_pending.pop(uid, None)
@@ -3203,7 +3203,7 @@ async def cmd_bot_guide(message: types.Message):
         "• `/bot` - Bot features aur all commands guide details.\n"
         "• `/album <album_name>` - Naya album creation session start karne ke liye.\n"
         "• `/add <album_id/name>` - Mojuda album me naye files/text add karne ke liye.\n"
-        "• `/close` (ya `/cancel`) - Creation/addition session preview me save ya dismiss karne ke liye, ongoing view/delete/zip/b2 ko interrupt/cancel karne ke liye.\n"
+        "• `/close` - Creation/addition session preview me save ya dismiss karne ke liye, ongoing view/delete/zip/b2 ko interrupt/cancel karne ke liye.\n"
         "• `/albums` - Cloud ke saare albums ki list.\n"
         "• `/recent` - Hal hi me update hue albums ki checklist (admin only).\n"
         "• `/search <query>` - Tokenized multi-word tags, name aur file descriptions search ke liye.\n"

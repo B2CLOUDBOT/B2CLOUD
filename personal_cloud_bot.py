@@ -895,7 +895,7 @@ async def cmd_album(message: types.Message):
             f"⚠️ **Active Session Already Hai!**\n\n"
             f"📁 Album: **{active.get('name', '?')}**\n"
             f"🗂 Files: {files_count} abhi tak\n\n"
-            f"Pehle is session ko `/close` ya `/cancel` karo,\ntabhi naya album bana sakte ho!",
+            f"Pehle is session ko `/close` karo,\ntabhi naya album bana sakte ho!",
             reply_markup=builder.as_markup(),
             parse_mode="Markdown"
         )
@@ -911,8 +911,7 @@ async def cmd_album(message: types.Message):
         f"📸 **Album Creation Started!**\n\n"
         f"📁 Name: **{name}**\n"
         f"📤 Files bhejiye (photo/video/pdf/audio/text)\n"
-        f"✅ Done? `/close` likhein\n"
-        f"❌ Cancel? `/cancel` likhein",
+        f"✅ Done? `/close` likhein\n",
         parse_mode="Markdown"
     )
 
@@ -2593,11 +2592,11 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
         return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
 
     b2_cancel_flags.discard(message.from_user.id)
-    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s)...\n⛔ Stop karna ho to `/cancel` bhejo.", parse_mode="Markdown")
+    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s)...\n⛔ Stop karna ho to `/close` bhejo.", parse_mode="Markdown")
     for uid, uname in target_ids:
         if message.from_user.id in b2_cancel_flags:
             b2_cancel_flags.discard(message.from_user.id)
-            return await message.answer("⛔ /b2 stopped by /cancel", parse_mode="Markdown")
+            return await message.answer("⛔ /b2 stopped by /close", parse_mode="Markdown")
         try:
             await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             sent = 0

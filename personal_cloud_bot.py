@@ -831,7 +831,7 @@ async def cmd_start(message: types.Message):
         "┣ /merge `<id1>` `<id2>` `<name>` — Merge\n"
         "┣ /tag `<name/id>` `#tag1` `#tag2` — Tag add\n"
         "┣ /dlt `<name/id>` — Files selectively dlt\n"
-        "┣ /setpass `<name/id>` `<pass>` — Password\n"
+        "┣ /setpass `<name/id>` `<pass>` —Password\n"
         "┗ /removepass `<name/id>` — Password\n\n"
         "🔍 *View & Search*\n"
         "┣ /albums — Saare albums dekho\n"

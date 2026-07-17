@@ -910,8 +910,8 @@ async def cmd_album(message: types.Message):
     await message.answer(
         f"📸 **Album Creation Started!**\n\n"
         f"📁 Name: **{name}**\n"
-        f"📤 Files bhejiye (photo/video/pdf/audio/text)\n"
-        f"✅ Done? `/close` likhein\n",
+        f"📤 Files send (photo/video/pdf/audio/text)\n"
+        f"✅ Done? `/close` kare\n",
         parse_mode="Markdown"
     )
 
@@ -1385,7 +1385,7 @@ async def cmd_add(message: types.Message):
     folder_line = f"\n📂 Folder: **{md(folder)}**" if folder != "root" else ""
     await message.answer(
         f"➕ **Adding to: {md(album['name'])}**{folder_line}\n🆔 `{album['album_id']}` | Current: {album['count']} files\n\n"
-        f"Files bhejein (photo/video/pdf/audio/text), phir `/close`\n❌ Cancel: `/cancel`",
+        f"Files send (photo/video/pdf/audio/text), phir `/close`\n",
         parse_mode="Markdown"
     )
 
@@ -2026,7 +2026,7 @@ async def cmd_viewfolder(message: types.Message, _password_ok: bool = False):
     folder = normalize_folder(rest)
     if album_pass and not is_owner(uid) and not _password_ok:
         password_pending[uid] = {"action": "viewfolder", "album": album, "folder": folder}
-        return await message.answer(f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:", parse_mode="Markdown")
+        return await message.answer(f"🔐 *{album['name']}* password protected hai!\n\nPassword send:", parse_mode="Markdown")
 
     files = [f for f in album.get("photos", []) if isinstance(f, dict) and normalize_folder(f.get("folder", "root")) == folder]
     if not files:
@@ -2119,7 +2119,7 @@ async def perform_view(chat_id: int, user_id: int, identifier: str, _password_ok
         password_pending[user_id] = {"action": "view", "album": album}
         return await bot.send_message(
             chat_id,
-            f"🔐 *{md(album['name'])}* password protected hai!\n\nPassword bhejein:",
+            f"🔐 *{md(album['name'])}* password protected hai!\n\nPassword send:",
             parse_mode="Markdown"
         )
 
@@ -2203,7 +2203,7 @@ async def perform_zip(chat_id: int, user_id: int, identifier: str, _password_ok:
         password_pending[user_id] = {"action": "zip", "album": album}
         return await bot.send_message(
             chat_id,
-            f"🔐 *{md(album['name'])}* password protected hai!\n\nPassword bhejein:",
+            f"🔐 *{md(album['name'])}* password protected hai!\n\nPassword send:",
             parse_mode="Markdown"
         )
 
@@ -2569,7 +2569,7 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
         # Save state so that the next message is evaluated as the password for this b2 action
         password_pending[uid] = {"action": "b2", "album": album, "targets": targets_raw}
         return await message.answer(
-            f"🔐 *{album['name']}* password protected hai!\n\nPassword bhejein:",
+            f"🔐 *{album['name']}* password protected hai!\n\nPassword send:",
             parse_mode="Markdown"
         )
         

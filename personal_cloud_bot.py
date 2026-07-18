@@ -3363,9 +3363,12 @@ async def error_handler(event: types.ErrorEvent):
             pass
     elif update.message:
         try:
-            await update.message.answer("❌ Kuch galat ho gaya. Dobara try karein.")
+            await update.message.answer(f"❌ Kuch galat ho gaya: `{event.exception}`. Dobara try karein.", parse_mode="Markdown")
         except Exception:
-            pass
+            try:
+                await update.message.answer(f"❌ Kuch galat ho gaya: {event.exception}. Dobara try karein.")
+            except Exception:
+                pass
 
 
 # ============================================================

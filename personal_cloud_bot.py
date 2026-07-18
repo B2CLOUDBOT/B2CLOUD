@@ -2107,6 +2107,46 @@ async def cmd_cd(message: types.Message):
     await message.answer(f"📁 Current folder set: **{folder}**\nAb jo files/text bhejoge wo isi folder me save honge.", parse_mode="Markdown")
 
 
+async def perform_viewfolder(chat_id: int, user_id: int, album: dict, folder: str):
+    files = [f for f in album.get("photos", []) if isinstance(f, dict) and normalize_folder(f.get("folder", "root")) == folder]
+    if not files:
+        return await bot.send_message(chat_id, f"📂 Folder empty hai: `{folder}`", parse_mode="Markdown")
+
+    await bot.send_message(chat_id, f"📂 **{album['name']}** / `{folder}`\n🗂 {len(files)} files\n\n⏹ Rokna ho toh `/close` likhein", parse_mode="Markdown")
+    view_sessions[user_id] = True
+    sent = failed = 0
+    for item in files:
+        if not view_sessions.get(user_id):
+            await bot.send_message(chat_id, f"⏹ View band kar diya.\n✅ {sent} files bhej chuke the.")
+            return
+        fid = item.get("file_id", "") if isinstance(item, dict) else item
+        mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
+        channel_msg_id = item.get("channel_msg_id") or item.get("storage_msg_id") if isinstance(item, dict) else None
+        try:
+            if mtype == "text":
+                await bot.send_message(chat_id, item.get("text", ""))
+            elif channel_msg_id:
+                await bot.copy_message(chat_id, STORAGE_CHANNEL, channel_msg_id)
+            elif mtype == "video":
+                await bot.send_video(chat_id, fid)
+            elif mtype == "document":
+                await bot.send_document(chat_id, fid)
+            elif mtype == "audio":
+                await bot.send_audio(chat_id, fid)
+            elif mtype == "voice":
+                await bot.send_voice(chat_id, fid)
+            else:
+                await bot.send_photo(chat_id, fid)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.3)
+    view_sessions.pop(user_id, None)
+    summary = f"✅ {sent}/{len(files)} items sent from `{folder}`!"
+    if failed:
+        summary += f"\n⚠️ {failed} failed."
+    await bot.send_message(chat_id, summary, parse_mode="Markdown")
+
 @dp.message(Command("viewfolder"))
 async def cmd_viewfolder(message: types.Message, _password_ok: bool = False):
     if not is_admin(message.from_user.id):
@@ -2133,53 +2173,16 @@ async def cmd_viewfolder(message: types.Message, _password_ok: bool = False):
         password_pending[uid] = {"action": "viewfolder", "album": album, "folder": folder}
         return await message.answer(f"🔐 *{album['name']}* password protected hai!\n\nPassword send:", parse_mode="Markdown")
 
-    files = [f for f in album.get("photos", []) if isinstance(f, dict) and normalize_folder(f.get("folder", "root")) == folder]
-    if not files:
-        return await message.answer(f"📂 Folder empty hai: `{folder}`", parse_mode="Markdown")
-
-    await message.answer(f"📂 **{album['name']}** / `{folder}`\n🗂 {len(files)} files\n\n⏹ Rokna ho toh `/close` likhein", parse_mode="Markdown")
-    view_sessions[uid] = True
-    sent = failed = 0
-    for item in files:
-        if not view_sessions.get(uid):
-            await message.answer(f"⏹ View band kar diya.\n✅ {sent} files bhej chuke the.")
-            return
-        fid = item.get("file_id", "")
-        mtype = item.get("type", "photo")
-        channel_msg_id = item.get("channel_msg_id") or item.get("storage_msg_id")
-        try:
-            if mtype == "text":
-                await bot.send_message(message.chat.id, item.get("text", ""))
-            elif channel_msg_id:
-                await bot.copy_message(message.chat.id, STORAGE_CHANNEL, channel_msg_id)
-            elif mtype == "video":
-                await bot.send_video(message.chat.id, fid)
-            elif mtype == "document":
-                await bot.send_document(message.chat.id, fid)
-            elif mtype == "audio":
-                await bot.send_audio(message.chat.id, fid)
-            elif mtype == "voice":
-                await bot.send_voice(message.chat.id, fid)
-            else:
-                await bot.send_photo(message.chat.id, fid)
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.3)
-    view_sessions.pop(uid, None)
-    summary = f"✅ {sent}/{len(files)} items sent from `{folder}`!"
-    if failed:
-        summary += f"\n⚠️ {failed} failed."
-    await message.answer(summary, parse_mode="Markdown")
+    await perform_viewfolder(message.chat.id, uid, album, folder)
 
 # ============================================================
 # /view
 # ============================================================
 @dp.message(F.text.regexp(r"^/view_[A-Za-z0-9\-]+$"))
 async def view_shortcut(message: types.Message):
+    if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     aid = message.text.replace("/view_", "").strip()
-    message.text = f"/view {aid}"
-    await view_by_id(message)
+    await perform_view(message.chat.id, message.from_user.id, aid)
 
 @dp.message(Command("view"))
 async def view_by_id(message: types.Message, _password_ok: bool = False):
@@ -2729,9 +2732,12 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
             parse_mode="Markdown"
         )
         
+    await perform_b2(message.chat.id, uid, album, targets_raw, delay_sec, _password_ok)
+
+async def perform_b2(chat_id: int, owner_id: int, album: dict, targets_raw: list, delay_sec: int | None, _password_ok: bool = False):
     files = album.get("photos", [])
     if not files:
-        return await message.answer("❌ Album empty hai.", parse_mode="Markdown")
+        return await bot.send_message(chat_id, "❌ Album empty hai.", parse_mode="Markdown")
 
     target_ids = []
     for t in targets_raw:
@@ -2743,22 +2749,21 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
             if doc and doc.get("user_id"):
                 target_ids.append((int(doc["user_id"]), t))
             else:
-                await message.answer(f"⚠️ {t} ne bot me `/start` nahi kiya ya ID nahi mila, skip.", parse_mode="Markdown")
+                await bot.send_message(chat_id, f"⚠️ {t} ne bot me `/start` nahi kiya ya ID nahi mila, skip.", parse_mode="Markdown")
     if not target_ids:
-        return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
+        return await bot.send_message(chat_id, "❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
 
-    owner_id = message.from_user.id
     b2_active_sessions[owner_id] = {"target_uid": None, "sent_msg_ids": []}
     b2_cancel_flags.discard(owner_id)
 
     delay_info = f" (Auto-delete after {delay_sec}s)" if delay_sec else ""
-    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s){delay_info}...\n⛔ Stop aur sent files delete karne ke liye `/close` bhejo.", parse_mode="Markdown")
+    await bot.send_message(chat_id, f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s){delay_info}...\n⛔ Stop aur sent files delete karne ke liye `/close` bhejo.", parse_mode="Markdown")
 
     for uid, uname in target_ids:
         if owner_id in b2_cancel_flags:
             b2_cancel_flags.discard(owner_id)
             b2_active_sessions.pop(owner_id, None)
-            return await message.answer("⛔ /b2 stopped. No files sent.", parse_mode="Markdown")
+            return await bot.send_message(chat_id, "⛔ /b2 stopped. No files sent.", parse_mode="Markdown")
 
         b2_active_sessions[owner_id]["target_uid"] = uid
         b2_active_sessions[owner_id]["sent_msg_ids"] = []
@@ -2772,7 +2777,7 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
                 if owner_id in b2_cancel_flags:
                     b2_cancel_flags.discard(owner_id)
                     b2_active_sessions.pop(owner_id, None)
-                    return # cmd_close already deletes sent files, so we just return
+                    return
 
                 fid = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
@@ -2790,7 +2795,7 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
                 except Exception as e:
                     logger.warning(f"B2 item send failed to {uid}: {e}")
                     if "blocked by the user" in str(e).lower() or "user is deactivated" in str(e).lower():
-                        await message.answer(f"❌ **{uname}** ne bot ko block kiya hai ya account deactivated hai. Sending skipped.", parse_mode="Markdown")
+                        await bot.send_message(chat_id, f"❌ **{uname}** ne bot ko block kiya hai ya account deactivated hai. Sending skipped.", parse_mode="Markdown")
                         break
                 await asyncio.sleep(0.25)
             complete_msg = await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
@@ -2801,10 +2806,12 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
 
-            await b2_history_col.insert_one({"album_id": album["album_id"], "album_name": album["name"], "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname, "files_count": sent, "sent_at": now_db()})
-            await message.answer(f"✅ **{uname}** ko {sent} items bhej di!", parse_mode="Markdown")
+            await b2_history_col.insert_one({"album_id": album["album_id"], "album_name": album["name"], "sent_by": owner_id, "sent_to": uid, "sent_to_name": uname, "files_count": sent, "sent_at": now_db()})
+            await bot.send_message(chat_id, f"✅ **{uname}** ko {sent} items bhej di!", parse_mode="Markdown")
         except Exception as e:
-            await message.answer(f"❌ **{uname}** ko bhejne mein error: {e}", parse_mode="Markdown")
+            await bot.send_message(chat_id, f"❌ **{uname}** ko bhejne mein error: {e}", parse_mode="Markdown")
+
+    b2_active_sessions.pop(owner_id, None)
 
 
 # ============================================================
@@ -2944,22 +2951,16 @@ async def handle_text_and_password(message: types.Message):
     del password_pending[uid]
 
     if action == "view":
-        message.text = f"/view {fresh['album_id']}"
-        await view_by_id(message, _password_ok=True)
+        await perform_view(message.chat.id, uid, fresh['album_id'], _password_ok=True)
     elif action == "viewfolder":
         folder = pending.get("folder", "root")
-        message.text = f"/viewfolder {fresh['album_id']} {folder}"
-        await cmd_viewfolder(message, _password_ok=True)
+        await perform_viewfolder(message.chat.id, uid, fresh, folder)
     elif action == "zip":
-        message.text = f"/zip {fresh['album_id']}"
-        await cmd_zip(message, _password_ok=True)
+        await perform_zip(message.chat.id, uid, fresh['album_id'], _password_ok=True)
     elif action == "b2":
         targets = pending.get("targets", [])
-        targets_str = " ".join(targets)
         delay_sec = pending.get("delay_sec")
-        delay_str = f" {delay_sec} s" if delay_sec else ""
-        message.text = f"/b2 {fresh['album_id']} {targets_str}{delay_str}"
-        await cmd_b2(message, _password_ok=True)
+        await perform_b2(message.chat.id, uid, fresh, targets, delay_sec, _password_ok=True)
 
 
 
@@ -3363,12 +3364,9 @@ async def error_handler(event: types.ErrorEvent):
             pass
     elif update.message:
         try:
-            await update.message.answer(f"❌ Kuch galat ho gaya: `{event.exception}`. Dobara try karein.", parse_mode="Markdown")
+            await update.message.answer("❌ Kuch galat ho gaya. Dobara try karein.")
         except Exception:
-            try:
-                await update.message.answer(f"❌ Kuch galat ho gaya: {event.exception}. Dobara try karein.")
-            except Exception:
-                pass
+            pass
 
 
 # ============================================================

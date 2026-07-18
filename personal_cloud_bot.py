@@ -470,16 +470,17 @@ async def send_to_storage(fid: str, mtype: str, text_content: str = ""):
     return None, 0
 
 
-async def send_document_retry(chat_id: int, file_bytes: bytes, filename: str, caption: str = "", parse_mode: str | None = None, retries: int = 5):
-    """Fix for /zip error: name 'send_document_retry' is not defined.
-    Bytes ko BufferedInputFile bana ke retry ke sath document send karta hai.
-    """
-    from aiogram.types import BufferedInputFile
+async def send_document_retry(chat_id: int, file_bytes_or_path: bytes | str, filename: str, caption: str = "", parse_mode: str | None = None, retries: int = 5):
+    """BufferedInputFile (bytes) ya FSInputFile (str path) safely send karta hai with retries."""
+    from aiogram.types import BufferedInputFile, FSInputFile
 
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            doc = BufferedInputFile(file_bytes, filename=filename)
+            if isinstance(file_bytes_or_path, str):
+                doc = FSInputFile(file_bytes_or_path, filename=filename)
+            else:
+                doc = BufferedInputFile(file_bytes_or_path, filename=filename)
             return await bot.send_document(chat_id=chat_id, document=doc, caption=caption, parse_mode=parse_mode)
         except Exception as e:
             last_error = e
@@ -2317,131 +2318,145 @@ async def perform_zip(chat_id: int, user_id: int, identifier: str, _password_ok:
             )
         except: pass
 
-        downloaded = []
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=5, sock_read=10)) as sess:
-            for dl_idx, (fid, mtype, fname, tg_file, storage_msg_id) in enumerate(small_files, 1):
-                if user_id in b2_cancel_flags:
-                    b2_cancel_flags.discard(user_id)
-                    return await bot.send_message(chat_id, "⛔ ZIP operation stopped by user.")
+        import tempfile
+        import shutil
+        import os
 
-                try:
-                    file_path = tg_file.file_path
-                    if not file_path:
-                        raise ValueError("file_path empty")
-                    url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file_path}"
-                    async with sess.get(url) as resp:
-                        if resp.status == 200:
-                            data = await resp.read()
-                            if len(data) == 0:
-                                raise ValueError("Downloaded data empty")
-                            if fname and "." in fname:
-                                safe_name = re.sub(r'[^\w\.\-]', '_', fname)
-                            else:
-                                if file_path and "." in file_path:
-                                    ext = file_path.rsplit(".", 1)[-1].lower()
-                                    if ext not in ("jpg", "jpeg", "png", "gif", "mp4", "mp3",
-                                                   "ogg", "pdf", "doc", "docx", "zip", "rar"):
-                                        ext = EXT_MAP.get(mtype, "bin")
-                                else:
-                                    ext = EXT_MAP.get(mtype, "bin")
-                                safe_name = f"{dl_idx:04d}_{mtype}.{ext}"
-                            downloaded.append((safe_name, data))
-                        else:
-                            raise ValueError(f"HTTP {resp.status}")
-                except Exception as e:
-                    logger.error(f"Download failed [{dl_idx}] {mtype}: {e}")
-                    dl_failed += 1
-                    large_files.append((fid, mtype, fname, storage_msg_id))
+        # Create a unique temp folder
+        temp_dir = tempfile.mkdtemp(prefix="b2zip_")
+        downloaded = [] # stores (safe_name, file_size)
 
-                if dl_idx % 10 == 0:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=5, sock_read=10)) as sess:
+                for dl_idx, (fid, mtype, fname, tg_file, storage_msg_id) in enumerate(small_files, 1):
+                    if user_id in b2_cancel_flags:
+                        b2_cancel_flags.discard(user_id)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return await bot.send_message(chat_id, "⛔ ZIP operation stopped by user.")
+
                     try:
-                        await status_msg.edit_text(
-                            f"⏬ Downloading... {dl_idx}/{len(small_files)}\n"
-                            f"✅ OK: {len(downloaded)} | ❌ Failed: {dl_failed}\n"
-                            f"📁 **{md(album['name'])}**",
-                            parse_mode="Markdown"
-                        )
-                    except: pass
-                await asyncio.sleep(0.1)
+                        file_path = tg_file.file_path
+                        if not file_path:
+                            raise ValueError("file_path empty")
+                        url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file_path}"
+                        async with sess.get(url) as resp:
+                            if resp.status == 200:
+                                data = await resp.read()
+                                if len(data) == 0:
+                                    raise ValueError("Downloaded data empty")
+                                if fname and "." in fname:
+                                    safe_name = re.sub(r'[^\w\.\-]', '_', fname)
+                                else:
+                                    if file_path and "." in file_path:
+                                        ext = file_path.rsplit(".", 1)[-1].lower()
+                                        if ext not in ("jpg", "jpeg", "png", "gif", "mp4", "mp3",
+                                                       "ogg", "pdf", "doc", "docx", "zip", "rar"):
+                                            ext = EXT_MAP.get(mtype, "bin")
+                                    else:
+                                        ext = EXT_MAP.get(mtype, "bin")
+                                    safe_name = f"{dl_idx:04d}_{mtype}.{ext}"
+                                
+                                # Write directly to disk
+                                file_on_disk = os.path.join(temp_dir, safe_name)
+                                with open(file_on_disk, "wb") as f_out:
+                                    f_out.write(data)
+                                
+                                downloaded.append((safe_name, len(data)))
+                            else:
+                                raise ValueError(f"HTTP {resp.status}")
+                    except Exception as e:
+                        logger.error(f"Download failed [{dl_idx}] {mtype}: {e}")
+                        dl_failed += 1
+                        large_files.append((fid, mtype, fname, storage_msg_id))
 
-        if downloaded:
-            try:
-                await status_msg.edit_text(
-                    f"🗜 ZIP pack kar raha hoon ({len(downloaded)} files)...\n📁 **{md(album['name'])}**",
-                    parse_mode="Markdown"
-                )
-            except: pass
+                    if dl_idx % 10 == 0:
+                        try:
+                            await status_msg.edit_text(
+                                f"⏬ Downloading... {dl_idx}/{len(small_files)}\n"
+                                f"✅ OK: {len(downloaded)} | ❌ Failed: {dl_failed}\n"
+                                f"📁 **{md(album['name'])}**",
+                                parse_mode="Markdown"
+                            )
+                        except: pass
+                    await asyncio.sleep(0.1)
 
-            zip_name = re.sub(r'[^\w\-]', '_', album["name"]).strip("_") or "album"
-            parts = []
-            cur_files = []
-            cur_size  = 0
-
-            for safe_name, data in downloaded:
-                file_size = len(data)
-                if file_size >= SPLIT_SIZE:
-                    if cur_files:
-                        zip_buf = io.BytesIO()
-                        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                            for n, d in cur_files:
-                                zf.writestr(n, d)
-                        parts.append((zip_buf.getvalue(), len(cur_files)))
-                        cur_files = []
-                        cur_size  = 0
-                    zip_buf = io.BytesIO()
-                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        zf.writestr(safe_name, data)
-                    parts.append((zip_buf.getvalue(), 1))
-                    continue
-
-                if cur_size + file_size > SPLIT_SIZE and cur_files:
-                    zip_buf = io.BytesIO()
-                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for n, d in cur_files:
-                            zf.writestr(n, d)
-                    parts.append((zip_buf.getvalue(), len(cur_files)))
-                    cur_files = []
-                    cur_size  = 0
-                cur_files.append((safe_name, data))
-                cur_size += file_size
-
-            if cur_files:
-                zip_buf = io.BytesIO()
-                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for n, d in cur_files:
-                        zf.writestr(n, d)
-                parts.append((zip_buf.getvalue(), len(cur_files)))
-
-            total_parts = len(parts)
-            for part_num, (zip_bytes, file_count) in enumerate(parts, 1):
-                if user_id in b2_cancel_flags:
-                    b2_cancel_flags.discard(user_id)
-                    return await bot.send_message(chat_id, "⛔ ZIP sending stopped by user.")
-                if total_parts > 1:
-                    part_fname = f"{zip_name}_part{part_num}of{total_parts}.zip"
-                    part_label = f" (Part {part_num}/{total_parts})"
-                else:
-                    part_fname = f"{zip_name}.zip"
-                    part_label = ""
-
-                zip_size_mb = len(zip_bytes) / (1024 * 1024)
+            if downloaded:
                 try:
-                    await send_document_retry(
-                        chat_id,
-                        zip_bytes,
-                        part_fname,
-                        (
-                            f"📦 **{md(part_fname)}**{part_label}\n"
-                            f"🗂 {file_count} files | 💾 {zip_size_mb:.1f} MB\n"
-                            f"📁 {md(album['name'])}"
-                        ),
+                    await status_msg.edit_text(
+                        f"🗜 ZIP pack kar raha hoon ({len(downloaded)} files)...\n📁 **{md(album['name'])}**",
                         parse_mode="Markdown"
                     )
-                    zip_parts_sent += 1
-                    total_zipped   += file_count
-                except Exception as e:
-                    logger.error(f"ZIP send error part {part_num}: {e}")
-                    await bot.send_message(chat_id, f"❌ ZIP Part {part_num} send nahi hua: {e}")
+                except: pass
+
+                zip_name = re.sub(r'[^\w\-]', '_', album["name"]).strip("_") or "album"
+                parts = []
+                cur_files = []
+                cur_size  = 0
+
+                for safe_name, file_size in downloaded:
+                    if file_size >= SPLIT_SIZE:
+                        if cur_files:
+                            parts.append((cur_files, len(cur_files)))
+                            cur_files = []
+                            cur_size  = 0
+                        parts.append(([(safe_name, file_size)], 1))
+                        continue
+
+                    if cur_size + file_size > SPLIT_SIZE and cur_files:
+                        parts.append((cur_files, len(cur_files)))
+                        cur_files = []
+                        cur_size  = 0
+                    cur_files.append((safe_name, file_size))
+                    cur_size += file_size
+
+                if cur_files:
+                    parts.append((cur_files, len(cur_files)))
+
+                total_parts = len(parts)
+                for part_num, (files_list, file_count) in enumerate(parts, 1):
+                    if user_id in b2_cancel_flags:
+                        b2_cancel_flags.discard(user_id)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return await bot.send_message(chat_id, "⛔ ZIP sending stopped by user.")
+                    
+                    if total_parts > 1:
+                        part_fname = f"{zip_name}_part{part_num}of{total_parts}.zip"
+                        part_label = f" (Part {part_num}/{total_parts})"
+                    else:
+                        part_fname = f"{zip_name}.zip"
+                        part_label = ""
+
+                    # Create zip part on disk
+                    zip_part_path = os.path.join(temp_dir, f"part_{part_num}.zip")
+                    with zipfile.ZipFile(zip_part_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for n, size in files_list:
+                            file_on_disk_path = os.path.join(temp_dir, n)
+                            zf.write(file_on_disk_path, n)
+
+                    zip_size_mb = os.path.getsize(zip_part_path) / (1024 * 1024)
+                    try:
+                        await send_document_retry(
+                            chat_id,
+                            zip_part_path,
+                            part_fname,
+                            (
+                                f"📦 **{md(part_fname)}**{part_label}\n"
+                                f"🗂 {file_count} files | 💾 {zip_size_mb:.1f} MB\n"
+                                f"📁 {md(album['name'])}"
+                            ),
+                            parse_mode="Markdown"
+                        )
+                        zip_parts_sent += 1
+                        total_zipped   += file_count
+                    except Exception as e:
+                        logger.error(f"ZIP send error part {part_num}: {e}")
+                        await bot.send_message(chat_id, f"❌ ZIP Part {part_num} send nahi hua: {e}")
+                    finally:
+                        try: os.remove(zip_part_path)
+                        except: pass
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     # ── Step 4: Large files direct send ──────────────────
     if large_files:

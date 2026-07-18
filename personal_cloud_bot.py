@@ -130,6 +130,7 @@ b2_history_col = db.b2_history
 
 # Runtime controls
 b2_cancel_flags = set()
+b2_active_sessions = {}  # owner_id -> {"target_uid": int, "sent_msg_ids": list}
 album_save_lock = asyncio.Lock()  # ek time par sirf 1 album/add save hoga
 
 user_sessions = {}
@@ -1205,6 +1206,25 @@ async def cmd_close(message: types.Message):
         return await message.answer("⏹ View band kar diya!")
 
     # Stop /b2 transmission
+    if uid in b2_active_sessions:
+        session_info = b2_active_sessions[uid]
+        b2_cancel_flags.add(uid)
+        target_uid = session_info.get("target_uid")
+        sent_ids = session_info.get("sent_msg_ids", [])
+        
+        # Delete already sent messages immediately
+        deleted_count = 0
+        for mid in sent_ids:
+            try:
+                await bot.delete_message(target_uid, mid)
+                deleted_count += 1
+            except Exception as e:
+                logger.debug(f"Failed to delete message {mid} in /close b2 cancel: {e}")
+                
+        # Send confirmation
+        await message.answer(f"⛔ /b2 stopped. Deleted {deleted_count} already sent files from target chat.")
+        return
+
     if uid in b2_cancel_flags:
         return await message.answer("⛔ Stop signal already sent.")
     b2_cancel_flags.add(uid)
@@ -2564,11 +2584,32 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     # Parse album identifier and recipient list from message arguments
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        return await message.answer("❌ Usage: `/b2 <id/name> @u1 @u2` ya `/b2 <id/name> userid`", parse_mode="Markdown")
+        return await message.answer("❌ Usage: `/b2 <id/name> @u1 @u2 [delay] [s/m/h]`", parse_mode="Markdown")
 
     tokens = args[1].strip().split()
     if len(tokens) < 2:
         return await message.answer("❌ Album name/id aur recipient dein.", parse_mode="Markdown")
+
+    # Parse delay from tokens if present at the end
+    delay_sec = None
+    if len(tokens) >= 2:
+        last_tok = tokens[-1].lower()
+        sec_last = tokens[-2]
+        if last_tok in ("s", "m", "h") and sec_last.isdigit():
+            mult = {"s": 1, "m": 60, "h": 3600}[last_tok]
+            delay_sec = int(sec_last) * mult
+            tokens.pop() # pop unit
+            tokens.pop() # pop value
+        elif last_tok.endswith(("s", "m", "h")) and last_tok[:-1].isdigit():
+            unit = last_tok[-1]
+            val = int(last_tok[:-1])
+            mult = {"s": 1, "m": 60, "h": 3600}[unit]
+            delay_sec = val * mult
+            tokens.pop() # pop value+unit
+        elif last_tok.isdigit():
+            delay_sec = int(last_tok)
+            tokens.pop() # pop digit
+
     targets_raw = []
     # Recipients can be username starting with '@' or numerical user ID
     while tokens and (tokens[-1].startswith("@") or tokens[-1].lstrip("-").isdigit()):
@@ -2590,7 +2631,7 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     album_pass = album.get("password")
     if album_pass and not is_owner(uid) and not _password_ok:
         # Save state so that the next message is evaluated as the password for this b2 action
-        password_pending[uid] = {"action": "b2", "album": album, "targets": targets_raw}
+        password_pending[uid] = {"action": "b2", "album": album, "targets": targets_raw, "delay_sec": delay_sec}
         return await message.answer(
             f"🔐 *{album['name']}* password protected hai!\n\nPassword send:",
             parse_mode="Markdown"
@@ -2614,37 +2655,66 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     if not target_ids:
         return await message.answer("❌ Koi valid recipient nahi mila.", parse_mode="Markdown")
 
-    b2_cancel_flags.discard(message.from_user.id)
-    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s)...\n⛔ Stop karna ho to `/close` bhejo.", parse_mode="Markdown")
-    for uid, uname in target_ids:
-        if message.from_user.id in b2_cancel_flags:
-            b2_cancel_flags.discard(message.from_user.id)
+    owner_id = message.from_user.id
+    b2_active_sessions[owner_id] = {"target_uid": None, "sent_msg_ids": []}
+    b2_cancel_flags.discard(owner_id)
+
+    delay_info = f" (Auto-delete after {delay_sec}s)" if delay_sec else ""
+    await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s){delay_info}...\n⛔ Stop aur sent files delete karne ke liye `/close` bhejo.", parse_mode="Markdown")
+
+    for target_uid, uname in target_ids:
+        if owner_id in b2_cancel_flags:
+            b2_cancel_flags.discard(owner_id)
+            b2_active_sessions.pop(owner_id, None)
             return await message.answer("⛔ /b2 stopped. No files sent.", parse_mode="Markdown")
+
+        b2_active_sessions[owner_id]["target_uid"] = target_uid
+        b2_active_sessions[owner_id]["sent_msg_ids"] = []
+
         try:
-            await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
+            intro_msg = await bot.send_message(target_uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
+            b2_active_sessions[owner_id]["sent_msg_ids"].append(intro_msg.message_id)
+            if delay_sec:
+                task = asyncio.create_task(auto_delete_message(target_uid, intro_msg.message_id, delay_sec))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
+
             sent = 0
             for item in files:
-                if message.from_user.id in b2_cancel_flags:
-                    b2_cancel_flags.discard(message.from_user.id)
-                    return await message.answer(f"⛔ /b2 stopped. Sent {sent}/{len(files)} files to **{uname}** before stopping.", parse_mode="Markdown")
+                if owner_id in b2_cancel_flags:
+                    b2_cancel_flags.discard(owner_id)
+                    b2_active_sessions.pop(owner_id, None)
+                    return # cmd_close already deletes sent files, so we just return
+
                 fid = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 try:
                     if mtype == "text":
-                        await bot.send_message(uid, item.get("text", "") if isinstance(item, dict) else "")
-                    elif mtype == "video": await bot.send_video(uid, fid)
-                    elif mtype == "document": await bot.send_document(uid, fid)
-                    elif mtype == "audio": await bot.send_audio(uid, fid)
-                    elif mtype == "voice": await bot.send_voice(uid, fid)
-                    else: await bot.send_photo(uid, fid)
+                        sent_msg = await bot.send_message(uid, item.get("text", "") if isinstance(item, dict) else "")
+                    elif mtype == "video": sent_msg = await bot.send_video(uid, fid)
+                    elif mtype == "document": sent_msg = await bot.send_document(uid, fid)
+                    elif mtype == "audio": sent_msg = await bot.send_audio(uid, fid)
+                    elif mtype == "voice": sent_msg = await bot.send_voice(uid, fid)
+                    else: sent_msg = await bot.send_photo(uid, fid)
+                    
                     sent += 1
+                    b2_active_sessions[owner_id]["sent_msg_ids"].append(sent_msg.message_id)
+                    if delay_sec:
+                        task = asyncio.create_task(auto_delete_message(uid, sent_msg.message_id, delay_sec))
+                        _background_tasks.add(task)
+                        task.add_done_callback(_background_tasks.discard)
                 except Exception as e:
                     logger.warning(f"B2 item send failed to {uid}: {e}")
                     if "blocked by the user" in str(e).lower() or "user is deactivated" in str(e).lower():
                         await message.answer(f"❌ **{uname}** ne bot ko block kiya hai ya account deactivated hai. Sending skipped.", parse_mode="Markdown")
                         break
                 await asyncio.sleep(0.25)
-            await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
+            complete_msg = await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
+            b2_active_sessions[owner_id]["sent_msg_ids"].append(complete_msg.message_id)
+            if delay_sec:
+                task = asyncio.create_task(auto_delete_message(uid, complete_msg.message_id, delay_sec))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
             await b2_history_col.insert_one({"album_id": album["album_id"], "album_name": album["name"], "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname, "files_count": sent, "sent_at": now_db()})
             await message.answer(f"✅ **{uname}** ko {sent} items bhej di!", parse_mode="Markdown")
         except Exception as e:
@@ -2800,7 +2870,9 @@ async def handle_text_and_password(message: types.Message):
     elif action == "b2":
         targets = pending.get("targets", [])
         targets_str = " ".join(targets)
-        message.text = f"/b2 {fresh['album_id']} {targets_str}"
+        delay_sec = pending.get("delay_sec")
+        delay_str = f" {delay_sec} s" if delay_sec else ""
+        message.text = f"/b2 {fresh['album_id']} {targets_str}{delay_str}"
         await cmd_b2(message, _password_ok=True)
 
 

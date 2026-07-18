@@ -2513,8 +2513,16 @@ async def perform_zip(chat_id: int, user_id: int, identifier: str, _password_ok:
 
     try:
         await status_msg.edit_text(final_text, parse_mode="Markdown")
-    except:
-        await bot.send_message(chat_id, final_text, parse_mode="Markdown")
+    except: pass
+
+    try:
+        await bot.send_message(
+            chat_id,
+            f"🔔 **Zip Process Complete!**\n\n{final_text}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send final zip completion message: {e}")
 
 
 # ============================================================

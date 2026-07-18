@@ -1199,7 +1199,7 @@ async def cmd_close(message: types.Message):
             return await message.answer("❌ Delete operation cancel.", parse_mode="Markdown")
 
     # Stop view session
-    if uid in view_sessions:
+    if view_sessions.get(uid):
         view_sessions[uid] = False
         return await message.answer("⏹ View band kar diya!")
 
@@ -2318,7 +2318,7 @@ async def perform_zip(chat_id: int, user_id: int, identifier: str, _password_ok:
         except: pass
 
         downloaded = []
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as sess:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=5, sock_read=10)) as sess:
             for dl_idx, (fid, mtype, fname, tg_file, storage_msg_id) in enumerate(small_files, 1):
                 if user_id in b2_cancel_flags:
                     b2_cancel_flags.discard(user_id)
@@ -2596,14 +2596,14 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     for uid, uname in target_ids:
         if message.from_user.id in b2_cancel_flags:
             b2_cancel_flags.discard(message.from_user.id)
-            return await message.answer("⛔ /b2 stopped by /close", parse_mode="Markdown")
+            return await message.answer("⛔ /b2 stopped. No files sent.", parse_mode="Markdown")
         try:
             await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             sent = 0
             for item in files:
                 if message.from_user.id in b2_cancel_flags:
                     b2_cancel_flags.discard(message.from_user.id)
-                    return await message.answer(f"⛔ /b2 stopped. Last target: **{uname}**", parse_mode="Markdown")
+                    return await message.answer(f"⛔ /b2 stopped. Sent {sent}/{len(files)} files to **{uname}** before stopping.", parse_mode="Markdown")
                 fid = item["file_id"] if isinstance(item, dict) else item
                 mtype = item.get("type", "photo") if isinstance(item, dict) else "photo"
                 try:
@@ -2617,6 +2617,9 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
                     sent += 1
                 except Exception as e:
                     logger.warning(f"B2 item send failed to {uid}: {e}")
+                    if "blocked by the user" in str(e).lower() or "user is deactivated" in str(e).lower():
+                        await message.answer(f"❌ **{uname}** ne bot ko block kiya hai ya account deactivated hai. Sending skipped.", parse_mode="Markdown")
+                        break
                 await asyncio.sleep(0.25)
             await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
             await b2_history_col.insert_one({"album_id": album["album_id"], "album_name": album["name"], "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname, "files_count": sent, "sent_at": now_db()})

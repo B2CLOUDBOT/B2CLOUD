@@ -1241,13 +1241,12 @@ async def cmd_close(message: types.Message):
 @dp.callback_query(F.data.in_({"confirm_save", "confirm_cancel"}))
 async def process_confirm(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    if uid not in user_sessions:
-        await callback.answer("Session expire ho gaya!", show_alert=True)
+    session = user_sessions.pop(uid, None)
+    if not session:
+        await callback.answer("Session already processed or expired!", show_alert=True)
         try: await callback.message.delete()
         except: pass
         return
-
-    session = user_sessions[uid]
 
     if callback.data == "confirm_save":
         album_id = f"ALB-{now_ist().strftime('%y%m%d%H%M%S')}"
@@ -1368,7 +1367,7 @@ async def process_confirm(callback: types.CallbackQuery):
         except: pass
         await callback.message.answer("❌ Album save cancel.")
 
-    del user_sessions[uid]
+
 
 
 # ============================================================

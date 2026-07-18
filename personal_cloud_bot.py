@@ -858,8 +858,7 @@ async def cmd_start(message: types.Message):
             "\n\n👑 *Owner Controls*\n"
             "┣ /grant `<id/@user>` — Access do\n"
             "┣ /denied `<id/@user>` — Access hatao\n"
-            "┣ /idinfo — Granted users + albums\n"
-            "┣ /idinfo `<id/@user>` — Kisi ka bhi info\n"
+            "┣ /idinfo `<id/@user>` — Granted users + albums\n"
             "┣ /makelist `<title>` — Checklist banao\n"
             "┣ /list `<title>` — Granted + History"
         )

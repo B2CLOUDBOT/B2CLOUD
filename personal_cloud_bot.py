@@ -2662,20 +2662,20 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
     delay_info = f" (Auto-delete after {delay_sec}s)" if delay_sec else ""
     await message.answer(f"📤 Sending **{md(album['name'])}** to {len(target_ids)} user(s){delay_info}...\n⛔ Stop aur sent files delete karne ke liye `/close` bhejo.", parse_mode="Markdown")
 
-    for target_uid, uname in target_ids:
+    for uid, uname in target_ids:
         if owner_id in b2_cancel_flags:
             b2_cancel_flags.discard(owner_id)
             b2_active_sessions.pop(owner_id, None)
             return await message.answer("⛔ /b2 stopped. No files sent.", parse_mode="Markdown")
 
-        b2_active_sessions[owner_id]["target_uid"] = target_uid
+        b2_active_sessions[owner_id]["target_uid"] = uid
         b2_active_sessions[owner_id]["sent_msg_ids"] = []
 
         try:
-            intro_msg = await bot.send_message(target_uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
+            intro_msg = await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             b2_active_sessions[owner_id]["sent_msg_ids"].append(intro_msg.message_id)
             if delay_sec:
-                task = asyncio.create_task(auto_delete_message(target_uid, intro_msg.message_id, delay_sec))
+                task = asyncio.create_task(auto_delete_message(uid, intro_msg.message_id, delay_sec))
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
 

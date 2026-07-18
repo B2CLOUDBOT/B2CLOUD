@@ -98,6 +98,19 @@ async def auto_delete_message(chat_id: int, message_id: int, delay: int | None =
     except Exception:
         pass
 
+
+async def auto_delete_b2_messages(chat_id: int, message_ids: list[int], delay: int):
+    if int(chat_id) == int(STORAGE_CHANNEL):
+        return
+    if delay <= 0:
+        return
+    await asyncio.sleep(delay)
+    for mid in message_ids:
+        try:
+            await bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
 async def auto_delete_outgoing_middleware(make_request, bot, method):
     result = await make_request(bot, method)
     try:
@@ -2674,10 +2687,6 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
         try:
             intro_msg = await bot.send_message(uid, f"📂 **{md(album['name'])}**\n🗂 {len(files)} files\n_Loading..._", parse_mode="Markdown")
             b2_active_sessions[owner_id]["sent_msg_ids"].append(intro_msg.message_id)
-            if delay_sec:
-                task = asyncio.create_task(auto_delete_message(uid, intro_msg.message_id, delay_sec))
-                _background_tasks.add(task)
-                task.add_done_callback(_background_tasks.discard)
 
             sent = 0
             for item in files:
@@ -2699,10 +2708,6 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
                     
                     sent += 1
                     b2_active_sessions[owner_id]["sent_msg_ids"].append(sent_msg.message_id)
-                    if delay_sec:
-                        task = asyncio.create_task(auto_delete_message(uid, sent_msg.message_id, delay_sec))
-                        _background_tasks.add(task)
-                        task.add_done_callback(_background_tasks.discard)
                 except Exception as e:
                     logger.warning(f"B2 item send failed to {uid}: {e}")
                     if "blocked by the user" in str(e).lower() or "user is deactivated" in str(e).lower():
@@ -2711,10 +2716,12 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
                 await asyncio.sleep(0.25)
             complete_msg = await bot.send_message(uid, f"✅ **{sent} items** received!", parse_mode="Markdown")
             b2_active_sessions[owner_id]["sent_msg_ids"].append(complete_msg.message_id)
+
             if delay_sec:
-                task = asyncio.create_task(auto_delete_message(uid, complete_msg.message_id, delay_sec))
+                task = asyncio.create_task(auto_delete_b2_messages(uid, list(b2_active_sessions[owner_id]["sent_msg_ids"]), delay_sec))
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
+
             await b2_history_col.insert_one({"album_id": album["album_id"], "album_name": album["name"], "sent_by": message.from_user.id, "sent_to": uid, "sent_to_name": uname, "files_count": sent, "sent_at": now_db()})
             await message.answer(f"✅ **{uname}** ko {sent} items bhej di!", parse_mode="Markdown")
         except Exception as e:

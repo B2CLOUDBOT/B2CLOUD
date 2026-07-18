@@ -830,35 +830,27 @@ async def cmd_start(message: types.Message):
         )
         return
 
-    common = (
-        "☁️ *Personal Cloud Bot*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📁 *Album Management*\n"
-        "┣ /album `<name>` — New album banao\n"
-        "┣ /add `<name/id>` — Files add karo\n"
-        "┗ /close — View, Save, stop karna\n\n"
-        "🗂 *Organize*\n"
-        "┣ /lock `<name/id>` — Album lock\n"
-        "┣ /unlock `<name/id>` — Album unlock\n"
-        "┣ /pin `<name/id>` — Album pin\n"
-        "┣ /unpin `<name/id>` — Album unpin\n"
-        "┣ /rename `<old>` `<new>` — Album rename\n"
-        "┣ /merge `<id1>` `<id2>` `<name>` — Merge\n"
-        "┣ /tag `<name/id>` `#tag1` `#tag2` — Tag add\n"
-        "┣ /dlt `<name/id>` — Files selectively dlt\n"
-        "┣ /setpass `<name/id>` `<pass>` —Password\n"
-        "┗ /removepass `<name/id>` — Password\n\n"
-        "🔍 *View & Search*\n"
-        "┣ /albums — Saare albums dekho\n"
-        "┣ /view `<name/id>` — Album, tags dekho\n"
-        "┣ /search `name/tag/id` — name, tag, id\n"
-        "┣ /sort `date/sizes/name/files` — Sort\n"
-        "┣ /info `<name/id>` — Album details\n"
-        "┗ /stats — Cloud stats\n\n"
-        "📤 *Share & Export*\n"
-        "┣ /b2 `<id>` `@u1` `@u2` — Album share karo\n"
-        "┗ /zip `<name/id>` — ZIP ya forward karo\n\n"
-        "🆔 /id — Apna User ID dekho"
+    welcome_text = (
+        "☁️ *B2 CLOUD*\n\n"
+        f"👋 Welcome, *{md(message.from_user.full_name or 'Friend')}*!\n\n"
+        "⚡ Apna personal cloud yahin manage karo.\n\n"
+        "📦 Unlimited Albums\n"
+        "🔒 Secure Storage\n"
+        "⚡ Fast Search\n"
+        "📤 Easy Sharing\n"
+        "🗜 ZIP Export\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "🚀 *Quick Start*\n\n"
+        "🆕 New Album\n"
+        "➜ /album `<name>`\n\n"
+        "📂 My Albums\n"
+        "➜ /albums\n\n"
+        "❌ /close\n"
+        "➜ Current upload session band karo\n\n"
+        "📊 Statistics\n"
+        "➜ /stats\n\n"
+        "⚙️ *More Commands*\n"
+        "Menu Button 👇 or /help"
     )
 
     if is_owner(uid):
@@ -869,11 +861,11 @@ async def cmd_start(message: types.Message):
             "┣ /idinfo — Granted users + albums\n"
             "┣ /idinfo `<id/@user>` — Kisi ka bhi info\n"
             "┣ /makelist `<title>` — Checklist banao\n"
-            "┣ /list `<title>` — Granted + History\n"
+            "┣ /list `<title>` — Granted + History"
         )
-        await message.answer(common + owner_extra, parse_mode="Markdown")
+        await message.answer(welcome_text + owner_extra, parse_mode="Markdown")
     else:
-        await message.answer(common, parse_mode="Markdown")
+        await message.answer(welcome_text, parse_mode="Markdown")
 
 
 # ============================================================
@@ -3222,13 +3214,13 @@ async def cmd_stats(message: types.Message):
 # ============================================================
 # /bot
 # ============================================================
-@dp.message(Command("bot"))
-async def cmd_bot_guide(message: types.Message):
+@dp.message(Command("help"))
+async def cmd_help_guide(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Access Denied!")
     
     text = (
-        "🤖 *B2 CLOUD BOT - Features & Command Guide* 🤖\n"
+        "🤖 *B2 CLOUD - Help & Command Guide* 🤖\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*✨ Major Features:*\n"
         "1. **☁️ Personal Cloud Storage:** Apne Telegram channel ko data store karne ke liye scale pagination aur multi-sheet checklist ke sath manage karein.\n"
@@ -3236,24 +3228,22 @@ async def cmd_bot_guide(message: types.Message):
         "3. **📂 Folder Support:** Har album ke andar custom folders (directories) banayein aur `/cd` se subfolders switch karke clean storage organize karein.\n"
         "4. **🔐 Password Protection:** Custom albums ko password lock lagayein taaki unauthorized users directly share (`/b2`), view (`/view`) ya zip export (`/zip`) na kar sakein.\n"
         "5. **📦 Split Smart ZIP Exports:** Albums ko fast download karke max 18MB parts ki safe ZIP format me compress karke export karein, target limits automatic splits ke sath.\n"
-        "6. **🔎 Tokenized Search:** Tokens AND-match logic ke sath album tags, name aur descriptions me multi-word search karein.\n"
-        "7. **🕓 Auto-delete & Rate Limit Protection:** Private chat logs default 8-hour me automatic clean honge. User spamming par automatic active rate limiting protection wired hai.\n\n"
+        "6. **🕓 Auto-delete & Rate Limit Protection:** Private chat logs default 8-hour me automatic clean honge. User spamming par automatic active rate limiting protection wired hai.\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "*🛠️ Bot Commands List & Work:*\n\n"
         "• `/start` - Bot onboarding status aur entry.\n"
-        "• `/bot` - Bot features aur all commands guide details.\n"
+        "• `/help` - Bot features aur all commands guide details.\n"
         "• `/album <album_name>` - Naya album creation session start karne ke liye.\n"
         "• `/add <album_id/name>` - Mojuda album me naye files/text add karne ke liye.\n"
         "• `/close` - Creation/addition session preview me save ya dismiss karne ke liye, ongoing view/delete/zip/b2 ko interrupt/cancel karne ke liye.\n"
         "• `/albums` - Cloud ke saare albums ki list.\n"
         "• `/recent` - Hal hi me update hue albums ki checklist (admin only).\n"
-        "• `/search <query>` - Tokenized multi-word tags, name aur file descriptions search ke liye.\n"
         "• `/sort <name/size/files/date>` - Albums list custom ordering ke liye.\n"
         "• `/stats` - Advanced total size, type distribution aur biggest albums report.\n"
         "• `/view <album_id/name>` - Pure album content ko view aur save karne ke liye.\n"
         "• `/viewfolder <album_id> <folder_name>` - Album ke andar kisi specific subfolder ke items view karne ke liye.\n"
         "• `/zip <album_id/name>` - Smart splitting zip compiler run karne ke liye.\n"
-        "• `/b2 <album_id> <recipients>` - Album details direct specified users ko transfer karne ke liye.\n"
+        "• `/b2 <album_id> <recipients> [delay_seconds]` - Album details direct specified users ko transfer karne ke liye.\n"
         "• `/id` - Apni telegram profile info display karne ke liye.\n"
         "• `/list` - Active granted users list aur b2 histories dekhne ke liye (owner only).\n"
         "• `/mkdir <album_id> <folder>` - Album me subfolder banane ke liye.\n"
@@ -3419,12 +3409,11 @@ async def main():
         from aiogram.types import BotCommand
         commands = [
             BotCommand(command="start", description="Start bot onboarding"),
-            BotCommand(command="bot", description="View bot features and commands guide"),
+            BotCommand(command="help", description="View bot features and commands guide"),
             BotCommand(command="album", description="Create a new album"),
             BotCommand(command="add", description="Add files/text to an existing album"),
             BotCommand(command="albums", description="List all albums (admin only)"),
             BotCommand(command="recent", description="List recently updated albums (admin only)"),
-            BotCommand(command="search", description="Search for albums or files (admin only)"),
             BotCommand(command="sort", description="Sort albums by date, size, name or files (admin only)"),
             BotCommand(command="stats", description="View advanced cloud statistics (admin only)"),
             BotCommand(command="close", description="Close/Save active album session"),

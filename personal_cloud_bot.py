@@ -3022,78 +3022,8 @@ async def cmd_id(message: types.Message):
 
 
 # ============================================================
-# FREE EXTRA FEATURES - SEARCH / PIN / SORT / STATS / DUPES / LIMIT / NOTIFY
+# FREE EXTRA FEATURES - PIN / SORT / STATS / DUPES / LIMIT / NOTIFY
 # ============================================================
-@dp.message(Command("search"))
-async def cmd_search(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return await message.answer("🚫 Access Denied!")
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.answer("❌ Usage:\n`/search maths`\n`/search pdf notes`\n`/search #physics`", parse_mode="Markdown")
-    
-    q = args[1].strip().lower()
-    q_terms = [t for t in q.split() if t]
-    if not q_terms:
-        return await message.answer("❌ Usage:\n`/search maths`\n`/search pdf notes`\n`/search #physics`", parse_mode="Markdown")
-        
-    albums = await albums_col.find().sort("updated_at", -1).to_list(100000)
-    results = []
-    for alb in albums:
-        name = (alb.get("name") or "").lower()
-        aid = (alb.get("album_id") or "").lower()
-        tags = " ".join(alb.get("tags", [])).lower()
-        
-        score = 0
-        matched_terms = set()
-        file_hits = []
-        
-        for term in q_terms:
-            if term in name:
-                score += 5
-                matched_terms.add(term)
-            if term in aid:
-                score += 5
-                matched_terms.add(term)
-            if term in tags:
-                score += 4
-                matched_terms.add(term)
-                
-        for idx, f in enumerate(alb.get("photos", []), 1):
-            if not isinstance(f, dict):
-                continue
-            fname = (f.get("name") or "").lower()
-            ftype = (f.get("type") or "").lower()
-            text = (f.get("text") or "").lower()
-            
-            file_matched_any = False
-            for term in q_terms:
-                if term in fname or term in ftype or term in text:
-                    matched_terms.add(term)
-                    file_matched_any = True
-            if file_matched_any:
-                score += 2
-                display = f"#{idx} {f.get('type', '')} {f.get('name', '')}".strip()
-                file_hits.append(display)
-                
-        if len(matched_terms) == len(q_terms):
-            results.append((score, alb, file_hits[:3]))
-            
-    results.sort(key=lambda x: x[0], reverse=True)
-    if not results:
-        return await message.answer(f"❌ `{md(q)}` se kuch nahi mila.", parse_mode="Markdown")
-    
-    text = f"🔎 *Search Results:* `{md(q)}`\n━━━━━━━━━━━━━━━━━━\n\n"
-    for score, alb, hits in results[:15]:
-        lock = "🔒" if alb.get("locked") else "📁"
-        pin = "📌 " if alb.get("pinned") else ""
-        text += f"{pin}{lock} *{md(alb.get('name', 'Unnamed'))}*\n🆔 `{alb.get('album_id')}` | 🗂 {alb.get('count', 0)} files\n👁 `/view {alb.get('album_id')}`\n"
-        if hits:
-            text += "🎯 " + "\n🎯 ".join(md(h) for h in hits) + "\n"
-        text += "\n"
-    await message.answer(text.strip(), parse_mode="Markdown")
-
-
 @dp.message(Command("pin"))
 async def cmd_pin(message: types.Message):
     if not is_admin(message.from_user.id):

@@ -858,7 +858,7 @@ async def cmd_start(message: types.Message):
             "\n\n👑 *Owner Controls*\n"
             "┣ /grant `<id/@user>` — Access do\n"
             "┣ /denied `<id/@user>` — Access hatao\n"
-            "┣ /idinfo `<id/@user>` — Granted users + albums\n"
+            "┣ /info `<id/@user>` — User profile info\n"
             "┣ /makelist `<title>` — Checklist banao\n"
             "┣ /list `<title>` — Granted + History"
         )
@@ -1870,8 +1870,89 @@ async def cmd_list(message: types.Message):
 async def cmd_info(message: types.Message):
     if not is_admin(message.from_user.id): return await message.answer("🚫 Access Denied!")
     args = message.text.split(maxsplit=1)
-    if len(args) < 2: return await message.answer("❌ Usage: /info AlbumName  ya  /info ALB-xxx")
-    album = await find_album(args[1].strip())
+    
+    uid = message.from_user.id
+    if len(args) < 2:
+        if is_owner(uid):
+            return await message.answer("❌ Usage: `/info <album_name/id>` ya `/info <userid/@username>`", parse_mode="Markdown")
+        else:
+            return await message.answer("❌ Usage: `/info <album_name/id>`", parse_mode="Markdown")
+
+    target_arg = args[1].strip()
+    
+    # Check if target_arg is a user query (only for owner)
+    is_user_query = False
+    if is_owner(uid):
+        if target_arg.startswith("@") or target_arg.lstrip("-").isdigit():
+            album = await find_album(target_arg)
+            if not album:
+                is_user_query = True
+
+    if is_user_query:
+        target_uid = None
+        tg_info    = None
+
+        if target_arg.startswith("@"):
+            uname_lookup = target_arg.lstrip("@").lower()
+            doc = (await db.granted_users.find_one({"username": uname_lookup}) or
+                   await db.denied_users.find_one({"username": uname_lookup}))
+            if doc and doc.get("user_id"):
+                target_uid = doc["user_id"]
+            try:
+                chat = await bot.get_chat(f"@{uname_lookup}")
+                target_uid = target_uid or chat.id
+                tg_info = chat
+            except: pass
+            if not target_uid:
+                return await message.answer(f"❌ @{uname_lookup} nahi mila.", parse_mode="Markdown")
+        else:
+            try: target_uid = int(target_arg)
+            except: return await message.answer("❌ Valid User ID ya @username dein.", parse_mode="Markdown")
+            try:
+                tg_info = await bot.get_chat(target_uid)
+            except: pass
+
+        tg_name     = tg_info.full_name if tg_info and hasattr(tg_info, "full_name") else None
+        tg_username = tg_info.username  if tg_info else None
+
+        granted_doc = await db.granted_users.find_one({"user_id": target_uid})
+        denied_doc  = await db.denied_users.find_one({"user_id": target_uid})
+        if granted_doc:
+            status = "✅ Granted"
+            if granted_doc.get("pending"): status = "⏳ Pending"
+        elif denied_doc:
+            status = "🚫 Denied"
+        else:
+            status = "👤 Unknown"
+
+        albums = await albums_col.find({"created_by": target_uid}).sort("created_at", -1).to_list(50)
+
+        text = "👤 *User Info*\n━━━━━━━━━━━━━━━━━━\n"
+        if tg_name:     text += f"📛 {md(tg_name)}\n"
+        if tg_username: text += f"🔗 @{md(tg_username)}\n"
+        text += f"🆔 `{target_uid}`\n📊 Status: {status}\n"
+        if granted_doc:
+            text += f"📅 Granted: {safe_ist(granted_doc.get('granted_at', now_db()))}\n"
+        elif denied_doc:
+            text += f"📅 Denied: {safe_ist(denied_doc.get('denied_at', now_db()))}\n"
+
+        text += f"\n📁 *Albums ({len(albums)}):*\n"
+        if albums:
+            for alb in albums:
+                alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
+                text += f"\n• {md(alb['name'])}\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
+        else:
+            text += "Koi album nahi banya.\n"
+
+        try:
+            await message.answer(text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"/info user query error: {e}")
+            await message.answer(text)
+        return
+
+    # Album query
+    album = await find_album(target_arg)
     if not album: return await message.answer("❌ Album nahi mila.")
     mc = album.get("media_count", {})
     photos = mc.get("photos", 0)
@@ -2986,101 +3067,7 @@ async def cmd_denied(message: types.Message):
         await message.answer("❌ Valid ID ya @username dein.", parse_mode="Markdown")
 
 
-@dp.message(Command("idinfo"))
-async def cmd_idinfo(message: types.Message):
-    if not is_owner(message.from_user.id): return await message.answer("🚫 Sirf owner!")
-    args = message.text.split(maxsplit=1)
 
-    if len(args) < 2:
-        granted = await db.granted_users.find({"pending": {"$ne": True}}).to_list(100)
-        if not granted:
-            return await message.answer("📋 Koi granted user nahi.", parse_mode="Markdown")
-        text = "👥 *Granted Users Info:*\n━━━━━━━━━━━━━━━━━━\n\n"
-        for u in granted:
-            uid_val  = u.get("user_id")
-            uname    = u.get("username")
-            fullname = u.get("full_name", "")
-            date     = safe_ist(u.get("granted_at", now_db()))
-            albums   = await albums_col.find({"created_by": uid_val}).sort("created_at", -1).to_list(50)
-            if fullname: text += f"📛 {md(fullname)}\n"
-            if uname:    text += f"👤 @{md(uname)}\n"
-            text += f"🆔 `{uid_val}`\n📅 Granted: {date}\n"
-            if albums:
-                text += f"📁 Albums ({len(albums)}):\n"
-                for alb in albums:
-                    alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y")
-                    text += f"   • {md(alb['name'])} | 🗂{alb['count']} | {alb_date}\n"
-            else:
-                text += "📁 Koi album nahi\n"
-            text += "\n━━━━━━━━━━━━━━━━━━\n\n"
-        try:
-            await message.answer(text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"/idinfo no-args: {e}")
-            await message.answer(text)
-        return
-
-    target_arg = args[1].strip()
-    target_uid = None
-    tg_info    = None
-
-    if target_arg.startswith("@"):
-        uname_lookup = target_arg.lstrip("@").lower()
-        doc = (await db.granted_users.find_one({"username": uname_lookup}) or
-               await db.denied_users.find_one({"username": uname_lookup}))
-        if doc and doc.get("user_id"):
-            target_uid = doc["user_id"]
-        try:
-            chat = await bot.get_chat(f"@{uname_lookup}")
-            target_uid = target_uid or chat.id
-            tg_info = chat
-        except: pass
-        if not target_uid:
-            return await message.answer(f"❌ @{uname_lookup} nahi mila.", parse_mode="Markdown")
-    else:
-        try: target_uid = int(target_arg)
-        except: return await message.answer("❌ Valid User ID ya @username dein.", parse_mode="Markdown")
-        try:
-            tg_info = await bot.get_chat(target_uid)
-        except: pass
-
-    tg_name     = tg_info.full_name if tg_info and hasattr(tg_info, "full_name") else None
-    tg_username = tg_info.username  if tg_info else None
-
-    granted_doc = await db.granted_users.find_one({"user_id": target_uid})
-    denied_doc  = await db.denied_users.find_one({"user_id": target_uid})
-    if granted_doc:
-        status = "✅ Granted"
-        if granted_doc.get("pending"): status = "⏳ Pending"
-    elif denied_doc:
-        status = "🚫 Denied"
-    else:
-        status = "👤 Unknown"
-
-    albums = await albums_col.find({"created_by": target_uid}).sort("created_at", -1).to_list(50)
-
-    text = "👤 *User Info*\n━━━━━━━━━━━━━━━━━━\n"
-    if tg_name:     text += f"📛 {md(tg_name)}\n"
-    if tg_username: text += f"🔗 @{md(tg_username)}\n"
-    text += f"🆔 `{target_uid}`\n📊 Status: {status}\n"
-    if granted_doc:
-        text += f"📅 Granted: {safe_ist(granted_doc.get('granted_at', now_db()))}\n"
-    elif denied_doc:
-        text += f"📅 Denied: {safe_ist(denied_doc.get('denied_at', now_db()))}\n"
-
-    text += f"\n📁 *Albums ({len(albums)}):*\n"
-    if albums:
-        for alb in albums:
-            alb_date = alb.get("created_at", now_db()).strftime("%d %b %Y, %I:%M %p")
-            text += f"\n• {md(alb['name'])}\n  🆔 `{alb['album_id']}` | 🗂 {alb['count']} files\n  📅 {alb_date}\n"
-    else:
-        text += "Koi album nahi banya.\n"
-
-    try:
-        await message.answer(text, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"/idinfo error: {e}")
-        await message.answer(text)
 
 
 # ============================================================
@@ -3219,44 +3206,56 @@ async def cmd_help_guide(message: types.Message):
         return await message.answer("🚫 Access Denied!")
     
     text = (
-        "🤖 *B2 CLOUD - Help & Command Guide* 🤖\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "*✨ Major Features:*\n"
-        "1. **☁️ Personal Cloud Storage:** Apne Telegram channel ko data store karne ke liye scale pagination aur multi-sheet checklist ke sath manage karein.\n"
-        "2. **📁 Session Based Uploads:** `/album` ya `/add` command dekar active creation aur addition flows handle karein, safe confirmation preview screens ke sath save karein.\n"
-        "3. **📂 Folder Support:** Har album ke andar custom folders (directories) banayein aur `/cd` se subfolders switch karke clean storage organize karein.\n"
-        "4. **🔐 Password Protection:** Custom albums ko password lock lagayein taaki unauthorized users directly share (`/b2`), view (`/view`) ya zip export (`/zip`) na kar sakein.\n"
-        "5. **📦 Split Smart ZIP Exports:** Albums ko fast download karke max 18MB parts ki safe ZIP format me compress karke export karein, target limits automatic splits ke sath.\n"
-        "6. **🕓 Auto-delete & Rate Limit Protection:** Private chat logs default 8-hour me automatic clean honge. User spamming par automatic active rate limiting protection wired hai.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "*🛠️ Bot Commands List & Work:*\n\n"
-        "• `/start` - Bot onboarding status aur entry.\n"
-        "• `/help` - Bot features aur all commands guide details.\n"
-        "• `/album <album_name>` - Naya album creation session start karne ke liye.\n"
-        "• `/add <album_id/name>` - Mojuda album me naye files/text add karne ke liye.\n"
-        "• `/close` - Creation/addition session preview me save ya dismiss karne ke liye, ongoing view/delete/zip/b2 ko interrupt/cancel karne ke liye.\n"
-        "• `/albums` - Cloud ke saare albums ki list.\n"
-        "• `/recent` - Hal hi me update hue albums ki checklist (admin only).\n"
-        "• `/sort <name/size/files/date>` - Albums list custom ordering ke liye.\n"
-        "• `/stats` - Advanced total size, type distribution aur biggest albums report.\n"
-        "• `/view <album_id/name>` - Pure album content ko view aur save karne ke liye.\n"
-        "• `/viewfolder <album_id> <folder_name>` - Album ke andar kisi specific subfolder ke items view karne ke liye.\n"
-        "• `/zip <album_id/name>` - Smart splitting zip compiler run karne ke liye.\n"
-        "• `/b2 <album_id> <recipients> [delay_seconds]` - Album details direct specified users ko transfer karne ke liye.\n"
-        "• `/id` - Apni telegram profile info display karne ke liye.\n"
-        "• `/list` - Active granted users list aur b2 histories dekhne ke liye (owner only).\n"
-        "• `/mkdir <album_id> <folder>` - Album me subfolder banane ke liye.\n"
-        "• `/folders <album_id>` - Album ke folders list karne ke liye.\n"
-        "• `/cd <folder>` - Active session folder switch karne ke liye.\n"
-        "• `/setpass <album_id> <password>` - Album secure lock karne ke liye (owner only).\n"
-        "• `/removepass <album_id>` - Album password lock hatane ke liye (owner only).\n"
-        "• `/rename <album_id> <new_name>` - Album ka naam badalne ke liye.\n"
-        "• `/tag <album_id> #tag1 #tag2` - Album tags edit karne ke liye.\n"
-        "• `/grant <userid/@username>` - User ko bot use karne ka access dene ke liye (owner only).\n"
-        "• `/deny <userid/@username>` - User ka access block karne ke liye (owner only).\n"
-        "• `/makelist <title>` - Storage channel checklist update karne ke liye (owner only).\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "*(Apne private messages se sensitive data delete hone se bachane ke liye owner channel link direct refer karein.)*"
+        "☁️ *Personal Cloud Bot*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🚀 *Quick Start*\n"
+        "┣ /album `<name>` — New album banao\n"
+        "┣ /add `<name/id>` — Files add karo\n"
+        "┣ /close — Save & session close\n"
+        "┣ /albums — Saare albums dekho\n"
+        "┣ /view `<name/id>` — Album open karo\n"
+        "┗ /zip `<name/id>` — ZIP export\n\n"
+        "📁 *Organize*\n"
+        "┣ /mkdir `<id> <folder>` — Folder banao\n"
+        "┣ /folders `<id>` — Folder list\n"
+        "┣ /cd `<folder>` — Folder switch\n"
+        "┣ /rename `<old> <new>` — Album rename\n"
+        "┣ /tag `<name/id>` `#tag1` `#tag2` — Tags add\n"
+        "┣ /pin `<name/id>` — Album pin\n"
+        "┣ /unpin `<name/id>` — Album unpin\n"
+        "┣ /merge `<id1> <id2> <name>` — Merge albums\n"
+        "┗ /dlt `<name/id>` — Files delete\n\n"
+        "🔒 *Security*\n"
+        "┣ /lock `<name/id>` — Album lock\n"
+        "┣ /unlock `<name/id>` — Album unlock\n"
+        "┣ /setpass `<name/id> <pass>` — Password set\n"
+        "┗ /removepass `<name/id>` — Password remove\n\n"
+        "🔍 *Info*\n"
+        "┣ /recent — Recent albums\n"
+        "┣ /sort `date/size/name/files` — Sort\n"
+        "┣ /info `<name/id>` — Album details + User\n"
+        "┣ /stats — Cloud statistics\n"
+        "┗ /id — Your Telegram ID\n\n"
+        "📤 *Share*\n"
+        "┗ /b2 `<id> @u1 @u2` — Share album\n\n"
+        "👑 *Owner*\n"
+        "┣ /grant `<id/@user>` — Grant access\n"
+        "┣ /deny `<id/@user>` — Remove access\n"
+        "┣ /list — Granted + History\n"
+        "┗ /makelist `<title>` — Update checklist\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ *Features*\n\n"
+        "☁️ Personal Cloud Storage\n"
+        "📁 Session-based Uploads\n"
+        "📂 Folder Management\n"
+        "🔐 Password Protected Albums\n"
+        "📦 Smart Split ZIP Export (18MB Parts)\n"
+        "⚡ Fast Search & Sorting\n"
+        "📊 Storage Statistics\n"
+        "🕓 Auto-clean Private Chat (8 Hours)\n"
+        "🛡️ Anti-Spam & Rate Limit Protection\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 *Tip:* `/album MyFiles` → Files bhejo → `/close` karke save kar do."
     )
     await message.answer(text, parse_mode="Markdown")
 

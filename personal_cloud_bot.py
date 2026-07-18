@@ -3240,7 +3240,7 @@ async def cmd_help_guide(message: types.Message):
         "┗ /b2 `<id> @u1 @u2` — Share album\n\n"
         "👑 *Owner*\n"
         "┣ /grant `<id/@user>` — Grant access\n"
-        "┣ /deny `<id/@user>` — Remove access\n"
+        "┣ /denied `<id/@user>` — Remove access\n"
         "┣ /list — Granted + History\n"
         "┗ /makelist `<title>` — Update checklist\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"

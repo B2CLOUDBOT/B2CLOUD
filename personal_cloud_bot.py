@@ -2620,8 +2620,16 @@ async def cmd_b2(message: types.Message, _password_ok: bool = False):
             delay_sec = val * mult
             tokens.pop() # pop value+unit
         elif last_tok.isdigit():
-            delay_sec = int(last_tok)
-            tokens.pop() # pop digit
+            val = int(last_tok)
+            # A delay value must be small (< 100000) to distinguish it from a Telegram user ID,
+            # and there must be at least one target username or user ID left in tokens before it.
+            has_other_target = any(
+                t.startswith("@") or (t.lstrip("-").isdigit() and len(t) > 5)
+                for t in tokens[:-1]
+            )
+            if val < 100000 and has_other_target:
+                delay_sec = val
+                tokens.pop() # pop digit
 
     targets_raw = []
     # Recipients can be username starting with '@' or numerical user ID
